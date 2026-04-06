@@ -21,3 +21,14 @@ Plug-and-play **Flutter** UI package plus **Node.js + PostgreSQL** REST API for 
 3. Wrap your app with `SupportTicketsScope` and set `SupportTicketsConfig.apiBaseUrl` to your deployed API origin.
 
 Do **not** commit real `.env` files; use `.env.example` as a template.
+
+## Use this repo from another Flutter app (Git dependency)
+
+```yaml
+dependencies:
+  flutter_support_tickets:
+    git:
+      url: https://github.com/jagmohan0908/support-ticket-app.git
+      ref: main
+      path: flutter_support_tickets
+```
