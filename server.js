@@ -24,7 +24,7 @@ const ERP_MESSAGE_DOCTYPE = (process.env.ERP_MESSAGE_DOCTYPE || 'Support Ticket 
 const ERP_MESSAGE_TICKET_FIELD = (process.env.ERP_MESSAGE_TICKET_FIELD || 'ticket').trim();
 
 const MAX_LIST_LIMIT = 100;
-const VALID_STATUSES = new Set(['open', 'in_progress', 'resolved', 'closed']);
+const VALID_STATUSES = new Set(['open', 'in_progress', 'resolved', 'closed', 'waiting_for_customer']);
 const VALID_PRIORITIES = new Set(['low', 'medium', 'high', 'urgent']);
 
 const envPath = path.join(__dirname, '.env');
@@ -80,17 +80,21 @@ function safeJsonParse(value, fallback) {
 }
 
 function mapTicketFromERP(doc) {
+  const statusRaw = (doc.status || '').toString().trim();
+  const statusNorm = statusRaw.toLowerCase().replace(/\s+/g, '_');
+  const priorityRaw = (doc.priority || '').toString().trim();
+  const priorityNorm = priorityRaw.toLowerCase();
   return {
     id: doc.name,
     ticket_number: doc.ticket_number || doc.name,
-    user_id: doc.user_id || null,
-    user_name: doc.user_name || '',
-    user_email: doc.user_email || '',
-    user_phone: doc.user_phone || '',
+    user_id: doc.user_id || doc.email || null,
+    user_name: doc.user_name || doc.customer_name || '',
+    user_email: doc.user_email || doc.email || '',
+    user_phone: doc.user_phone || doc.phone || '',
     subject: doc.subject || '',
     description: doc.description || '',
-    status: doc.status || 'open',
-    priority: doc.priority || 'medium',
+    status: statusNorm || 'open',
+    priority: priorityNorm || 'medium',
     category: doc.category || null,
     assigned_to: doc.assigned_to || null,
     assigned_to_name: doc.assigned_to_name || null,
@@ -105,17 +109,19 @@ function mapTicketFromERP(doc) {
 
 function mapMessageFromERP(doc) {
   const attachments = safeJsonParse(doc.attachments, []);
+  const singleAttachment = doc.attachment ? [doc.attachment] : [];
+  const senderTypeRaw = (doc.sender_type || '').toString().trim().toLowerCase();
   return {
     id: doc.name,
     ticket_id: doc[ERP_MESSAGE_TICKET_FIELD] || doc.ticket || doc.ticket_id || '',
-    sender_type: doc.sender_type || 'user',
+    sender_type: senderTypeRaw === 'agent' ? 'agent' : 'user',
     sender_id: doc.sender_id || null,
     sender_name: doc.sender_name || '',
     message: doc.message || '',
-    attachments: Array.isArray(attachments) ? attachments : [],
+    attachments: Array.isArray(attachments) && attachments.length > 0 ? attachments : singleAttachment,
     is_read: Boolean(doc.is_read),
     read_at: toIso(doc.read_at, null),
-    created_at: toIso(doc.creation, new Date().toISOString()),
+    created_at: toIso(doc.timestamp || doc.creation, new Date().toISOString()),
     updated_at: toIso(doc.modified, new Date().toISOString()),
   };
 }
@@ -237,6 +243,23 @@ async function nextTicketNumber() {
   return `${prefix}${String(next).padStart(6, '0')}`;
 }
 
+function toERPStatus(value) {
+  const v = (value || '').toString().trim().toLowerCase();
+  if (v === 'in_progress') return 'In Progress';
+  if (v === 'waiting_for_customer') return 'Waiting for Customer';
+  if (v === 'resolved') return 'Resolved';
+  if (v === 'closed') return 'Closed';
+  return 'Open';
+}
+
+function toERPPriority(value) {
+  const v = (value || '').toString().trim().toLowerCase();
+  if (v === 'low') return 'Low';
+  if (v === 'high') return 'High';
+  if (v === 'urgent') return 'Urgent';
+  return 'Medium';
+}
+
 async function countUnreadAgentMessages(ticketId) {
   const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
     fields: ['name'],
@@ -282,8 +305,8 @@ app.post('/api/v1/support/tickets', async (req, res) => {
       priority = 'medium',
     } = req.body;
 
-    // SECURITY: Require user_id (user must be logged in)
-    if (!user_id) {
+    // SECURITY: Require some user identifier
+    if (!user_id && !user_email) {
       return res.status(401).json({
         success: false,
         message: 'Authentication required. Please log in to create a ticket.',
@@ -310,14 +333,16 @@ app.post('/api/v1/support/tickets', async (req, res) => {
       ticket_number: ticketNumber,
       // Some ERP setups keep customer_* fields mandatory alongside user_* fields.
       customer_name: user_name,
+      phone: user_phone,
+      email: user_email,
       user_id,
       user_name,
       user_email,
       user_phone,
       subject,
       description,
-      status: 'open',
-      priority,
+      status: toERPStatus('open'),
+      priority: toERPPriority(priority),
       category: category || null,
       metadata: JSON.stringify({ source: 'mobile_app' }),
     });
@@ -347,26 +372,33 @@ app.post('/api/v1/support/tickets', async (req, res) => {
 // ============================================
 app.get('/api/v1/support/tickets', async (req, res) => {
   try {
-    const { user_id, status, page = 1, limit = 20 } = req.query;
+    const { user_id, user_email, user_phone, status, page = 1, limit = 20 } = req.query;
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const limitNum = Math.min(Math.max(parseInt(limit, 10) || 20, 1), MAX_LIST_LIMIT);
     const offset = (pageNum - 1) * limitNum;
 
-    // SECURITY: Require user_id (user must be logged in)
-    if (!user_id) {
+    // SECURITY: Require at least one user identifier
+    if (!user_id && !user_email && !user_phone) {
       return res.status(401).json({
         success: false,
-        message: 'Authentication required. Please log in to view your tickets.',
+        message: 'Authentication required. Provide user_id or user_email/phone.',
       });
     }
 
-    const filters = [['user_id', '=', user_id]];
+    const filters = [];
+    if (user_email) {
+      filters.push(['email', '=', user_email]);
+    } else if (user_phone) {
+      filters.push(['phone', '=', user_phone]);
+    } else {
+      filters.push(['user_id', '=', user_id]);
+    }
     if (status) {
-      filters.push(['status', '=', status]);
+      filters.push(['status', '=', toERPStatus(status)]);
     }
 
     const rows = await erpGetList(ERP_TICKET_DOCTYPE, {
-      fields: ['name', 'ticket_number', 'user_id', 'user_name', 'user_email', 'user_phone', 'subject', 'description', 'status', 'priority', 'category', 'assigned_to', 'assigned_to_name', 'metadata', 'creation', 'modified', 'resolved_at', 'closed_at'],
+      fields: ['name', 'ticket_number', 'customer_name', 'phone', 'email', 'user_id', 'user_name', 'user_email', 'user_phone', 'subject', 'description', 'status', 'priority', 'category', 'assigned_to', 'assigned_to_name', 'metadata', 'creation', 'modified', 'resolved_at', 'closed_at'],
       filters,
       orderBy: 'creation desc',
       limit: limitNum,
@@ -417,7 +449,7 @@ app.get('/api/v1/support/tickets/:id', async (req, res) => {
     }
     const ticket = mapTicketFromERP(ticketDoc);
     const messageRows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
-      fields: ['name', ERP_MESSAGE_TICKET_FIELD, 'sender_type', 'sender_id', 'sender_name', 'message', 'attachments', 'is_read', 'read_at', 'creation', 'modified'],
+      fields: ['name', ERP_MESSAGE_TICKET_FIELD, 'sender_type', 'sender_id', 'sender_name', 'message', 'attachment', 'attachments', 'timestamp', 'is_read', 'read_at', 'creation', 'modified'],
       filters: [[ERP_MESSAGE_TICKET_FIELD, '=', ticket.id]],
       orderBy: 'creation asc',
       limit: MAX_LIST_LIMIT,
@@ -477,11 +509,11 @@ app.post('/api/v1/support/tickets/:id/messages', async (req, res) => {
     const ticketId = ticket.id;
 
     // Determine sender info based on sender_type
-    let finalSenderType = sender_type === 'agent' ? 'agent' : 'user';
+    let finalSenderType = sender_type === 'agent' ? 'Agent' : 'User';
     let finalSenderName;
     let finalSenderId = null;
     
-    if (finalSenderType === 'agent') {
+    if (finalSenderType === 'Agent') {
       // Agent message - use sender_name and sender_id from request
       finalSenderName = sender_name || 'Support Agent';
       finalSenderId = sender_id || null;
@@ -500,7 +532,9 @@ app.post('/api/v1/support/tickets/:id/messages', async (req, res) => {
       sender_id: finalSenderId,
       sender_name: finalSenderName,
       message,
+      attachment: Array.isArray(attachments) && attachments.length > 0 ? attachments[0] : '',
       attachments: JSON.stringify(Array.isArray(attachments) ? attachments : []),
+      timestamp: new Date().toISOString(),
       is_read: 0,
     });
 
@@ -548,7 +582,7 @@ app.get('/api/v1/support/tickets/:id/messages', async (req, res) => {
     }
 
     const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
-      fields: ['name', ERP_MESSAGE_TICKET_FIELD, 'sender_type', 'sender_id', 'sender_name', 'message', 'attachments', 'is_read', 'read_at', 'creation', 'modified'],
+      fields: ['name', ERP_MESSAGE_TICKET_FIELD, 'sender_type', 'sender_id', 'sender_name', 'message', 'attachment', 'attachments', 'timestamp', 'is_read', 'read_at', 'creation', 'modified'],
       filters,
       orderBy: 'creation asc',
       limit: limitNum,
@@ -602,7 +636,7 @@ app.patch('/api/v1/support/tickets/:id', async (req, res) => {
           message: `Invalid status. Must be one of: ${Array.from(VALID_STATUSES).join(', ')}`,
         });
       }
-      updateData.status = status;
+      updateData.status = toERPStatus(status);
       if (status === 'resolved') updateData.resolved_at = new Date().toISOString();
       if (status === 'closed') updateData.closed_at = new Date().toISOString();
     }
@@ -616,7 +650,7 @@ app.patch('/api/v1/support/tickets/:id', async (req, res) => {
           message: `Invalid priority. Must be one of: ${Array.from(VALID_PRIORITIES).join(', ')}`,
         });
       }
-      updateData.priority = priority;
+      updateData.priority = toERPPriority(priority);
     }
 
     if (Object.keys(updateData).length === 0) {
