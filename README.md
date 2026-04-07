@@ -1,34 +1,18 @@
-# Support ticket system
+# App Support Backend API
 
-Plug-and-play **Flutter** UI package plus **Node.js + PostgreSQL** REST API for customer support tickets (create, list, chat, agent messages).
+Backend-only Node.js API for App Support tickets.
 
-## Repository layout
+## Files in this repository
 
-| Path | Description |
-|------|----------------|
-| [`flutter_support_tickets/`](./flutter_support_tickets/) | Dart package: screens, API client, `SupportTicketsScope` config. |
-| [`backend/`](./backend/) | Express server: `/api/v1/support/...` endpoints. |
+- `server.js` - Express API server
+- `package.json` - dependencies and scripts
+- `package-lock.json` - locked dependency versions
 
-## Quick links
+## Run locally
 
-- **Flutter integration:** [flutter_support_tickets/README.md](./flutter_support_tickets/README.md)
-- **API & database:** [backend/README.md](./backend/README.md)
+1. Install dependencies:
+   - `npm install`
+2. Start server:
+   - `npm start`
 
-## Minimal integration
-
-1. Deploy **backend** (set `backend/.env` from `backend/.env.example`).
-2. Add the package to your Flutter `pubspec.yaml` (path or Git dependency pointing at `flutter_support_tickets/`).
-3. Wrap your app with `SupportTicketsScope` and set `SupportTicketsConfig.apiBaseUrl` to your deployed API origin.
-
-Do **not** commit real `.env` files; use `.env.example` as a template.
-
-## Use this repo from another Flutter app (Git dependency)
-
-```yaml
-dependencies:
-  flutter_support_tickets:
-    git:
-      url: https://github.com/jagmohan0908/support-ticket-app.git
-      ref: main
-      path: flutter_support_tickets
-```
+The server exposes support ticket API endpoints from `server.js`.
