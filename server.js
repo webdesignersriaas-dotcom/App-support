@@ -306,6 +306,8 @@ app.post('/api/v1/support/tickets', async (req, res) => {
     const ticketNumber = await nextTicketNumber();
     const created = await erpCreateDoc(ERP_TICKET_DOCTYPE, {
       ticket_number: ticketNumber,
+      // Some ERP setups keep customer_* fields mandatory alongside user_* fields.
+      customer_name: user_name,
       user_id,
       user_name,
       user_email,
