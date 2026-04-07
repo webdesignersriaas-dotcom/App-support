@@ -1,59 +1,253 @@
 // Support Ticket System - Node.js Backend API
-// Express + PostgreSQL
+// Express + ERPNext/Frappe (middleware architecture)
 
 const express = require('express');
-const { Pool } = require('pg');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 
-// Load .env file
 require('dotenv').config();
 
-// Debug: Check if .env file exists and is being loaded
-const envPath = path.join(__dirname, '.env');
-console.log('📁 Current directory:', __dirname);
-console.log('📄 Looking for .env at:', envPath);
-console.log('📄 .env file exists?', fs.existsSync(envPath) ? '✅ YES' : '❌ NO');
-
-if (!fs.existsSync(envPath)) {
-  console.error('❌ ERROR: .env file not found at:', envPath);
-  console.error('💡 Please create .env file in the backend folder');
-}
-
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = parseInt(process.env.PORT || '3000', 10);
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// PostgreSQL Connection Pool
-// Debug: Check if environment variables are loaded
-console.log('🔍 Environment check:');
-console.log('  DB_HOST:', process.env.DB_HOST || '13.202.148.229 (using default)');
-console.log('  DB_USER:', process.env.DB_USER || 'dba (using default)');
-console.log('  DB_NAME:', process.env.DB_NAME || 'support_tickets (using default)');
-console.log('  DB_PASSWORD:', process.env.DB_PASSWORD ? '***SET FROM .ENV***' : '***USING HARDCODED***');
+const ERP_BASE_URL = normalizeBaseUrl(process.env.ERP_BASE_URL || '');
+const ERP_API_KEY = (process.env.ERP_API_KEY || '').trim();
+const ERP_API_SECRET = (process.env.ERP_API_SECRET || '').trim();
+const ERP_BEARER_TOKEN = (process.env.ERP_BEARER_TOKEN || '').trim();
 
-const pool = new Pool({
-  host: process.env.DB_HOST || '13.202.148.229',
-  port: parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME || 'support_tickets',
-  user: process.env.DB_USER || 'dba',
-  password: process.env.DB_PASSWORD || '', 
-});
+const ERP_TICKET_DOCTYPE = (process.env.ERP_TICKET_DOCTYPE || 'Support Ticket').trim();
+const ERP_MESSAGE_DOCTYPE = (process.env.ERP_MESSAGE_DOCTYPE || 'Support Ticket Message').trim();
 
-// Test database connection
-pool.query('SELECT NOW()', (err, res) => {
-  if (err) {
-    console.error('❌ Database connection error:', err.message);
-    console.error('💡 Check your .env file and PostgreSQL is running');
-  } else {
-    console.log('✅ Database connected successfully');
-    console.log('📅 Database time:', res.rows[0].now);
+const MAX_LIST_LIMIT = 100;
+const VALID_STATUSES = new Set(['open', 'in_progress', 'resolved', 'closed']);
+const VALID_PRIORITIES = new Set(['low', 'medium', 'high', 'urgent']);
+
+const envPath = path.join(__dirname, '.env');
+console.log('📁 Current directory:', __dirname);
+console.log('📄 .env file exists?', fs.existsSync(envPath) ? '✅ YES' : '❌ NO');
+console.log('🌐 ERP base URL:', ERP_BASE_URL || '❌ NOT SET');
+console.log('📦 Ticket DocType:', ERP_TICKET_DOCTYPE);
+console.log('📦 Message DocType:', ERP_MESSAGE_DOCTYPE);
+
+if (!ERP_BASE_URL) {
+  console.warn('⚠️ ERP_BASE_URL is not configured. API requests will fail until set.');
+}
+if (!hasAuthConfigured()) {
+  console.warn('⚠️ ERP auth is not configured. Set ERP_API_KEY+ERP_API_SECRET or ERP_BEARER_TOKEN.');
+}
+
+function hasAuthConfigured() {
+  return Boolean((ERP_API_KEY && ERP_API_SECRET) || ERP_BEARER_TOKEN);
+}
+
+function normalizeBaseUrl(value) {
+  let out = (value || '').trim();
+  while (out.endsWith('/')) out = out.slice(0, -1);
+  return out;
+}
+
+function authHeaders() {
+  if (ERP_BEARER_TOKEN) {
+    return { Authorization: `Bearer ${ERP_BEARER_TOKEN}` };
   }
-});
+  if (ERP_API_KEY && ERP_API_SECRET) {
+    return { Authorization: `token ${ERP_API_KEY}:${ERP_API_SECRET}` };
+  }
+  return {};
+}
+
+function toIso(value, fallback = null) {
+  if (!value) return fallback;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? fallback : d.toISOString();
+}
+
+function safeJsonParse(value, fallback) {
+  if (value == null) return fallback;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return fallback;
+  try {
+    return JSON.parse(value);
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function mapTicketFromERP(doc) {
+  return {
+    id: doc.name,
+    ticket_number: doc.ticket_number || doc.name,
+    user_id: doc.user_id || null,
+    user_name: doc.user_name || '',
+    user_email: doc.user_email || '',
+    user_phone: doc.user_phone || '',
+    subject: doc.subject || '',
+    description: doc.description || '',
+    status: doc.status || 'open',
+    priority: doc.priority || 'medium',
+    category: doc.category || null,
+    assigned_to: doc.assigned_to || null,
+    assigned_to_name: doc.assigned_to_name || null,
+    created_at: toIso(doc.creation, new Date().toISOString()),
+    updated_at: toIso(doc.modified, new Date().toISOString()),
+    resolved_at: toIso(doc.resolved_at, null),
+    closed_at: toIso(doc.closed_at, null),
+    metadata: safeJsonParse(doc.metadata, null),
+    unread_message_count: typeof doc.unread_message_count === 'number' ? doc.unread_message_count : 0,
+  };
+}
+
+function mapMessageFromERP(doc) {
+  const attachments = safeJsonParse(doc.attachments, []);
+  return {
+    id: doc.name,
+    ticket_id: doc.ticket_id || '',
+    sender_type: doc.sender_type || 'user',
+    sender_id: doc.sender_id || null,
+    sender_name: doc.sender_name || '',
+    message: doc.message || '',
+    attachments: Array.isArray(attachments) ? attachments : [],
+    is_read: Boolean(doc.is_read),
+    read_at: toIso(doc.read_at, null),
+    created_at: toIso(doc.creation, new Date().toISOString()),
+    updated_at: toIso(doc.modified, new Date().toISOString()),
+  };
+}
+
+async function erpFetch(pathname, { method = 'GET', body, query } = {}) {
+  if (!ERP_BASE_URL) {
+    throw new Error('ERP_BASE_URL is not configured');
+  }
+
+  const url = new URL(`${ERP_BASE_URL}${pathname}`);
+  if (query && typeof query === 'object') {
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== null && v !== '') {
+        url.searchParams.set(k, typeof v === 'string' ? v : JSON.stringify(v));
+      }
+    }
+  }
+
+  const response = await fetch(url.toString(), {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const text = await response.text();
+  let parsed = null;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch (_) {
+    parsed = { message: text };
+  }
+
+  if (!response.ok) {
+    const message = parsed?.message || parsed?.exc || `ERPNext request failed: ${response.status}`;
+    const err = new Error(message);
+    err.status = response.status;
+    err.payload = parsed;
+    throw err;
+  }
+
+  return parsed;
+}
+
+async function erpGetList(doctype, { fields, filters, orderBy, limit = 20, offset = 0 } = {}) {
+  const payload = await erpFetch(`/api/resource/${encodeURIComponent(doctype)}`, {
+    query: {
+      fields: fields || ['name'],
+      filters: filters || [],
+      order_by: orderBy || 'creation desc',
+      limit_page_length: Math.min(Math.max(parseInt(limit, 10) || 20, 1), MAX_LIST_LIMIT),
+      limit_start: Math.max(parseInt(offset, 10) || 0, 0),
+    },
+  });
+  return Array.isArray(payload?.data) ? payload.data : [];
+}
+
+async function erpCreateDoc(doctype, doc) {
+  const payload = await erpFetch(`/api/resource/${encodeURIComponent(doctype)}`, {
+    method: 'POST',
+    body: doc,
+  });
+  return payload?.data || null;
+}
+
+async function erpGetDoc(doctype, name) {
+  const payload = await erpFetch(`/api/resource/${encodeURIComponent(doctype)}/${encodeURIComponent(name)}`);
+  return payload?.data || null;
+}
+
+async function erpUpdateDoc(doctype, name, data) {
+  const payload = await erpFetch(`/api/resource/${encodeURIComponent(doctype)}/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    body: data,
+  });
+  return payload?.data || null;
+}
+
+async function resolveTicketDoc(idOrTicketNumber) {
+  try {
+    const byName = await erpGetDoc(ERP_TICKET_DOCTYPE, idOrTicketNumber);
+    if (byName) return byName;
+  } catch (_) {
+    // fallback to ticket_number lookup
+  }
+
+  const list = await erpGetList(ERP_TICKET_DOCTYPE, {
+    fields: ['name', 'ticket_number', 'user_id', 'user_name', 'user_email', 'user_phone', 'subject', 'description', 'status', 'priority', 'category', 'assigned_to', 'assigned_to_name', 'metadata', 'creation', 'modified', 'resolved_at', 'closed_at'],
+    filters: [['ticket_number', '=', idOrTicketNumber]],
+    limit: 1,
+    orderBy: 'creation desc',
+  });
+  return list[0] || null;
+}
+
+async function nextTicketNumber() {
+  const year = new Date().getFullYear();
+  const prefix = `TKT-${year}-`;
+
+  const rows = await erpGetList(ERP_TICKET_DOCTYPE, {
+    fields: ['ticket_number'],
+    filters: [['ticket_number', 'like', `${prefix}%`]],
+    limit: MAX_LIST_LIMIT,
+    orderBy: 'creation desc',
+  });
+
+  let max = 0;
+  for (const r of rows) {
+    const value = (r.ticket_number || '').trim();
+    const match = value.match(/(\d+)$/);
+    if (match) {
+      const n = parseInt(match[1], 10);
+      if (!Number.isNaN(n) && n > max) max = n;
+    }
+  }
+  const next = max + 1;
+  return `${prefix}${String(next).padStart(6, '0')}`;
+}
+
+async function countUnreadAgentMessages(ticketId) {
+  const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
+    fields: ['name'],
+    filters: [
+      ['ticket_id', '=', ticketId],
+      ['sender_type', '=', 'agent'],
+      ['is_read', '=', 0],
+    ],
+    limit: MAX_LIST_LIMIT,
+    orderBy: 'creation desc',
+  });
+  return rows.length;
+}
 
 // ============================================
 // API ROUTES
@@ -63,7 +257,8 @@ pool.query('SELECT NOW()', (err, res) => {
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    message: 'Support Ticket API is running',
+    message: 'Support Ticket API middleware is running',
+    storage: 'erpnext',
     timestamp: new Date().toISOString()
   });
 });
@@ -101,93 +296,43 @@ app.post('/api/v1/support/tickets', async (req, res) => {
       });
     }
 
-    // Generate ticket number (format: TKT-YYYY-XXXXXX)
-    const year = new Date().getFullYear();
-    const result = await pool.query(
-      `SELECT COALESCE(MAX(CAST(SUBSTRING(ticket_number FROM '\\d+$') AS INTEGER)), 0) + 1 as next_num
-       FROM tickets
-       WHERE ticket_number LIKE $1`,
-      [`TKT-${year}-%`]
-    );
-    const nextNum = result.rows[0].next_num;
-    const ticketNumber = `TKT-${year}-${String(nextNum).padStart(6, '0')}`;
-
-    // Validate user_id - must be a valid UUID format
-    // Shopify IDs like "gid://shopify/Customer/8971995087157" are not valid UUIDs
-    let validUserId = null;
-    if (user_id) {
-      // Check if it's a valid UUID format (8-4-4-4-12 hex characters)
-      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (uuidRegex.test(user_id)) {
-        validUserId = user_id;
-      } else {
-        // Not a valid UUID - store in metadata instead
-        console.log(`⚠️ user_id "${user_id}" is not a valid UUID, storing in metadata instead`);
-      }
+    if (!VALID_PRIORITIES.has(priority)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid priority. Must be one of: ${Array.from(VALID_PRIORITIES).join(', ')}`,
+      });
     }
 
-    // Insert ticket into database
-    const insertResult = await pool.query(
-      `INSERT INTO tickets (
-        ticket_number, user_id, user_name, user_email, user_phone,
-        subject, description, status, priority, category, metadata
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-      RETURNING *`,
-      [
-        ticketNumber,
-        validUserId,
-        user_name,
-        user_email,
-        user_phone,
-        subject,
-        description,
-        'open',
-        priority,
-        category || null,
-        user_id && !validUserId ? JSON.stringify({ original_user_id: user_id }) : null,
-      ]
-    );
+    const ticketNumber = await nextTicketNumber();
+    const created = await erpCreateDoc(ERP_TICKET_DOCTYPE, {
+      ticket_number: ticketNumber,
+      user_id,
+      user_name,
+      user_email,
+      user_phone,
+      subject,
+      description,
+      status: 'open',
+      priority,
+      category: category || null,
+      metadata: JSON.stringify({ source: 'mobile_app' }),
+    });
 
-    const ticket = insertResult.rows[0];
+    const ticket = mapTicketFromERP(created || {});
 
     // Format response
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       data: {
-        ticket: {
-          id: ticket.id,
-          ticket_number: ticket.ticket_number,
-          user_id: ticket.user_id,
-          user_name: ticket.user_name,
-          user_email: ticket.user_email,
-          user_phone: ticket.user_phone,
-          subject: ticket.subject,
-          description: ticket.description,
-          status: ticket.status,
-          priority: ticket.priority,
-          category: ticket.category,
-          assigned_to: ticket.assigned_to,
-          assigned_to_name: ticket.assigned_to_name,
-          created_at: ticket.created_at,
-          updated_at: ticket.updated_at,
-        },
+        ticket,
       },
     });
   } catch (error) {
     console.error('❌ Error creating ticket:', error);
-    console.error('❌ Error details:', {
-      message: error.message,
-      code: error.code,
-      detail: error.detail,
-      hint: error.hint,
-      stack: error.stack,
-    });
-    res.status(500).json({
+    return res.status(error.status || 500).json({
       success: false,
       message: 'Failed to create ticket',
       error: error.message,
-      detail: error.detail || null,
-      hint: error.hint || null,
     });
   }
 });
@@ -199,9 +344,9 @@ app.post('/api/v1/support/tickets', async (req, res) => {
 app.get('/api/v1/support/tickets', async (req, res) => {
   try {
     const { user_id, status, page = 1, limit = 20 } = req.query;
-    const offset = (page - 1) * limit;
-
-    console.log('🔍 GET /api/v1/support/tickets - Query params:', { user_id, status, page, limit });
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 20, 1), MAX_LIST_LIMIT);
+    const offset = (pageNum - 1) * limitNum;
 
     // SECURITY: Require user_id (user must be logged in)
     if (!user_id) {
@@ -211,115 +356,39 @@ app.get('/api/v1/support/tickets', async (req, res) => {
       });
     }
 
-    // CRITICAL SECURITY: Always filter by user_id - NEVER return all tickets
-    let query = '';
-    const params = [];
-    let paramCount = 0;
-
-    // Validate if user_id is a valid UUID
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (uuidRegex.test(user_id)) {
-      // Valid UUID - filter by user_id column ONLY
-      paramCount++;
-      query = `SELECT * FROM tickets WHERE user_id = $${paramCount}`;
-      params.push(user_id);
-      console.log('✅ Filtering by UUID user_id:', user_id);
-    } else {
-      // Not a valid UUID (e.g., Shopify ID) - filter by metadata ONLY
-      paramCount++;
-      query = `SELECT * FROM tickets WHERE metadata IS NOT NULL AND metadata->>'original_user_id' = $${paramCount}`;
-      params.push(user_id);
-      console.log('✅ Filtering by metadata original_user_id:', user_id);
-    }
-    
-    // CRITICAL: If no user_id match condition, return empty result
-    if (query === '') {
-      console.error('❌ SECURITY ERROR: No user_id filter condition! Returning empty result.');
-      return res.status(200).json({
-        success: true,
-        data: {
-          tickets: [],
-          pagination: {
-            total: 0,
-            page: parseInt(page),
-            limit: parseInt(limit),
-            pages: 0,
-          },
-        },
-      });
-    }
-
+    const filters = [['user_id', '=', user_id]];
     if (status) {
-      paramCount++;
-      query += ` AND status = $${paramCount}`;
-      params.push(status);
+      filters.push(['status', '=', status]);
     }
 
-    query += ` ORDER BY created_at DESC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
-    params.push(parseInt(limit), offset);
+    const rows = await erpGetList(ERP_TICKET_DOCTYPE, {
+      fields: ['name', 'ticket_number', 'user_id', 'user_name', 'user_email', 'user_phone', 'subject', 'description', 'status', 'priority', 'category', 'assigned_to', 'assigned_to_name', 'metadata', 'creation', 'modified', 'resolved_at', 'closed_at'],
+      filters,
+      orderBy: 'creation desc',
+      limit: limitNum,
+      offset,
+    });
 
-    console.log('📝 Executing query:', query);
-    console.log('📝 Query params:', params);
-    console.log('🔒 SECURITY: Filtering tickets for user_id:', user_id);
-    
-    const result = await pool.query(query, params);
-    
-    console.log(`✅ Found ${result.rows.length} tickets for user_id: ${user_id}`);
-    
-    // SECURITY CHECK: Verify all returned tickets belong to this user
-    if (uuidRegex.test(user_id)) {
-      const invalidTickets = result.rows.filter(t => t.user_id !== user_id);
-      if (invalidTickets.length > 0) {
-        console.error('❌ SECURITY ERROR: Found tickets not belonging to user!', invalidTickets);
-        return res.status(500).json({
-          success: false,
-          message: 'Security error: Invalid ticket access detected',
-        });
-      }
-    } else {
-      const invalidTickets = result.rows.filter(t => {
-        const metadataUserId = t.metadata?.original_user_id || t.metadata?.['original_user_id'];
-        return metadataUserId !== user_id;
-      });
-      if (invalidTickets.length > 0) {
-        console.error('❌ SECURITY ERROR: Found tickets not belonging to user!', invalidTickets);
-        return res.status(500).json({
-          success: false,
-          message: 'Security error: Invalid ticket access detected',
-        });
-      }
-    }
-
-    // Get unread message count for each ticket
-    const ticketsWithUnread = await Promise.all(
-      result.rows.map(async (ticket) => {
-        const unreadResult = await pool.query(
-          `SELECT COUNT(*) as count
-           FROM ticket_messages
-           WHERE ticket_id = $1 AND is_read = FALSE AND sender_type = 'agent'`,
-          [ticket.id]
-        );
-        return {
-          ...ticket,
-          unread_message_count: parseInt(unreadResult.rows[0].count),
-        };
-      })
-    );
+    const ticketsWithUnread = await Promise.all(rows.map(async (row) => {
+      const ticket = mapTicketFromERP(row);
+      ticket.unread_message_count = await countUnreadAgentMessages(ticket.id);
+      return ticket;
+    }));
 
     res.json({
       success: true,
       data: {
         tickets: ticketsWithUnread,
         pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total: result.rowCount,
+          page: pageNum,
+          limit: limitNum,
+          total: ticketsWithUnread.length,
         },
       },
     });
   } catch (error) {
     console.error('❌ Error fetching tickets:', error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: 'Failed to fetch tickets',
       error: error.message,
@@ -335,55 +404,33 @@ app.get('/api/v1/support/tickets', async (req, res) => {
 app.get('/api/v1/support/tickets/:id', async (req, res) => {
   try {
     const { id } = req.params;
-
-    // Check if id is a UUID or ticket_number
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const isUUID = uuidRegex.test(id);
-
-    let ticketResult;
-    if (isUUID) {
-      // Query by ticket ID (UUID)
-      ticketResult = await pool.query(
-        'SELECT * FROM tickets WHERE id = $1',
-        [id]
-      );
-    } else {
-      // Query by ticket_number (e.g., TKT-2026-000001)
-      ticketResult = await pool.query(
-        'SELECT * FROM tickets WHERE ticket_number = $1',
-        [id]
-      );
-    }
-
-    if (ticketResult.rows.length === 0) {
+    const ticketDoc = await resolveTicketDoc(id);
+    if (!ticketDoc) {
       return res.status(404).json({
         success: false,
         message: 'Ticket not found',
       });
     }
-
-    // Get the actual ticket ID (UUID) from the result
-    // This is important when ticket_number was used instead of UUID
-    const ticketId = ticketResult.rows[0].id;
-
-    // Get messages for this ticket (use actual ticket ID)
-    const messagesResult = await pool.query(
-      `SELECT * FROM ticket_messages
-       WHERE ticket_id = $1
-       ORDER BY created_at ASC`,
-      [ticketId]
-    );
+    const ticket = mapTicketFromERP(ticketDoc);
+    const messageRows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
+      fields: ['name', 'ticket_id', 'sender_type', 'sender_id', 'sender_name', 'message', 'attachments', 'is_read', 'read_at', 'creation', 'modified'],
+      filters: [['ticket_id', '=', ticket.id]],
+      orderBy: 'creation asc',
+      limit: MAX_LIST_LIMIT,
+      offset: 0,
+    });
+    const messages = messageRows.map(mapMessageFromERP);
 
     res.json({
       success: true,
       data: {
-        ticket: ticketResult.rows[0],
-        messages: messagesResult.rows,
+        ticket,
+        messages,
       },
     });
   } catch (error) {
     console.error('❌ Error fetching ticket details:', error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: 'Failed to fetch ticket details',
       error: error.message,
@@ -415,35 +462,14 @@ app.post('/api/v1/support/tickets/:id/messages', async (req, res) => {
       });
     }
 
-    // Check if id is a UUID or ticket_number
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const isUUID = uuidRegex.test(id);
-
-    // Verify ticket exists
-    let ticketResult;
-    if (isUUID) {
-      // Query by ticket ID (UUID)
-      ticketResult = await pool.query(
-        'SELECT * FROM tickets WHERE id = $1',
-        [id]
-      );
-    } else {
-      // Query by ticket_number (e.g., TKT-2026-000001)
-      ticketResult = await pool.query(
-        'SELECT * FROM tickets WHERE ticket_number = $1',
-        [id]
-      );
-    }
-
-    if (ticketResult.rows.length === 0) {
+    const ticketDoc = await resolveTicketDoc(id);
+    if (!ticketDoc) {
       return res.status(404).json({
         success: false,
         message: 'Ticket not found',
       });
     }
-
-    const ticket = ticketResult.rows[0];
-    // Use the actual ticket ID (UUID) for message insertion
+    const ticket = mapTicketFromERP(ticketDoc);
     const ticketId = ticket.id;
 
     // Determine sender info based on sender_type
@@ -458,50 +484,31 @@ app.post('/api/v1/support/tickets/:id/messages', async (req, res) => {
     } else {
       // User message - use user_name and user_id from request or ticket
       finalSenderName = user_name || ticket.user_name;
-      
-      // Validate user_id - only use if it's a valid UUID
-      if (user_id) {
-        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-        if (uuidRegex.test(user_id)) {
-          finalSenderId = user_id;
-        }
-      }
+      if (user_id) finalSenderId = user_id;
       if (!finalSenderId && ticket.user_id) {
         finalSenderId = ticket.user_id;
       }
     }
 
-    // Insert message (use actual ticket ID from database)
-    const insertResult = await pool.query(
-      `INSERT INTO ticket_messages (
-        ticket_id, sender_type, sender_id, sender_name, message, attachments
-      ) VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING *`,
-      [
-        ticketId,
-        finalSenderType,
-        finalSenderId,
-        finalSenderName,
-        message,
-        JSON.stringify(attachments),
-      ]
-    );
-
-    // Update ticket updated_at timestamp
-    await pool.query(
-      'UPDATE tickets SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
-      [ticketId]
-    );
+    const created = await erpCreateDoc(ERP_MESSAGE_DOCTYPE, {
+      ticket_id: ticketId,
+      sender_type: finalSenderType,
+      sender_id: finalSenderId,
+      sender_name: finalSenderName,
+      message,
+      attachments: JSON.stringify(Array.isArray(attachments) ? attachments : []),
+      is_read: 0,
+    });
 
     res.status(201).json({
       success: true,
       data: {
-        message: insertResult.rows[0],
+        message: mapMessageFromERP(created || {}),
       },
     });
   } catch (error) {
     console.error('❌ Error sending message:', error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: 'Failed to send message',
       error: error.message,
@@ -518,69 +525,47 @@ app.get('/api/v1/support/tickets/:id/messages', async (req, res) => {
   try {
     const { id } = req.params;
     const { page = 1, limit = 50, since } = req.query;
-    const offset = (page - 1) * limit;
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 50, 1), MAX_LIST_LIMIT);
+    const offset = (pageNum - 1) * limitNum;
 
-    // Check if id is a UUID or ticket_number
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const isUUID = uuidRegex.test(id);
-
-    let ticketId;
-    if (isUUID) {
-      ticketId = id;
-    } else {
-      // Get ticket ID from ticket_number
-      const ticketResult = await pool.query(
-        'SELECT id FROM tickets WHERE ticket_number = $1',
-        [id]
-      );
-      if (ticketResult.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: 'Ticket not found',
-        });
-      }
-      ticketId = ticketResult.rows[0].id;
+    const ticketDoc = await resolveTicketDoc(id);
+    if (!ticketDoc) {
+      return res.status(404).json({
+        success: false,
+        message: 'Ticket not found',
+      });
     }
 
-    // Build query with optional since parameter for incremental fetching
-    let query = 'SELECT * FROM ticket_messages WHERE ticket_id = $1';
-    const params = [ticketId];
-    let paramCount = 1;
-
-    // If since parameter is provided, only fetch messages after that timestamp
+    const filters = [['ticket_id', '=', ticketDoc.name]];
     if (since) {
-      try {
-        const sinceDate = new Date(since);
-        if (!isNaN(sinceDate.getTime())) {
-          paramCount++;
-          query += ` AND created_at > $${paramCount}`;
-          params.push(sinceDate.toISOString());
-        }
-      } catch (e) {
-        // Invalid date format, ignore since parameter
-        console.warn('⚠️ Invalid since parameter format:', since);
-      }
+      const s = toIso(since, null);
+      if (s) filters.push(['creation', '>', s]);
     }
 
-    query += ` ORDER BY created_at ASC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
-    params.push(parseInt(limit), offset);
-
-    const result = await pool.query(query, params);
+    const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
+      fields: ['name', 'ticket_id', 'sender_type', 'sender_id', 'sender_name', 'message', 'attachments', 'is_read', 'read_at', 'creation', 'modified'],
+      filters,
+      orderBy: 'creation asc',
+      limit: limitNum,
+      offset,
+    });
+    const messages = rows.map(mapMessageFromERP);
 
     res.json({
       success: true,
       data: {
-        messages: result.rows,
+        messages,
         pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total: result.rowCount,
+          page: pageNum,
+          limit: limitNum,
+          total: messages.length,
         },
       },
     });
   } catch (error) {
     console.error('❌ Error fetching messages:', error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: 'Failed to fetch messages',
       error: error.message,
@@ -597,130 +582,56 @@ app.patch('/api/v1/support/tickets/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status, assigned_to, assigned_to_name, category, priority } = req.body;
-
-    // Check if id is a UUID or ticket_number
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const isUUID = uuidRegex.test(id);
-
-    let ticketId;
-    if (isUUID) {
-      ticketId = id;
-    } else {
-      // Get ticket ID from ticket_number
-      const ticketResult = await pool.query(
-        'SELECT id FROM tickets WHERE ticket_number = $1',
-        [id]
-      );
-      if (ticketResult.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: 'Ticket not found',
-        });
-      }
-      ticketId = ticketResult.rows[0].id;
-    }
-
-    // Build dynamic update query
-    const updateFields = [];
-    const params = [];
-    let paramCount = 0;
-
-    // Update status
-    if (status) {
-      const validStatuses = ['open', 'in_progress', 'resolved', 'closed'];
-      if (!validStatuses.includes(status)) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`,
-        });
-      }
-      paramCount++;
-      updateFields.push(`status = $${paramCount}`);
-      params.push(status);
-
-      // Set resolved_at or closed_at based on status
-      if (status === 'resolved') {
-        updateFields.push('resolved_at = CURRENT_TIMESTAMP');
-      }
-      if (status === 'closed') {
-        updateFields.push('closed_at = CURRENT_TIMESTAMP');
-      }
-    }
-
-    // Update assigned_to
-    if (assigned_to !== undefined) {
-      paramCount++;
-      updateFields.push(`assigned_to = $${paramCount}`);
-      params.push(assigned_to);
-    }
-
-    // Update assigned_to_name
-    if (assigned_to_name !== undefined) {
-      paramCount++;
-      updateFields.push(`assigned_to_name = $${paramCount}`);
-      params.push(assigned_to_name);
-    }
-
-    // Update category
-    if (category !== undefined) {
-      paramCount++;
-      updateFields.push(`category = $${paramCount}`);
-      params.push(category);
-    }
-
-    // Update priority
-    if (priority) {
-      const validPriorities = ['low', 'medium', 'high', 'urgent'];
-      if (!validPriorities.includes(priority)) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid priority. Must be one of: ${validPriorities.join(', ')}`,
-        });
-      }
-      paramCount++;
-      updateFields.push(`priority = $${paramCount}`);
-      params.push(priority);
-    }
-
-    // Check if there are any fields to update
-    if (updateFields.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No fields to update. Provide at least one: status, assigned_to, assigned_to_name, category, or priority',
-      });
-    }
-
-    // Always update updated_at
-    updateFields.push('updated_at = CURRENT_TIMESTAMP');
-    
-    // Add ticket ID for WHERE clause
-    paramCount++;
-    params.push(ticketId);
-
-    const result = await pool.query(
-      `UPDATE tickets
-       SET ${updateFields.join(', ')}
-       WHERE id = $${paramCount}
-       RETURNING *`,
-      params
-    );
-
-    if (result.rows.length === 0) {
+    const ticketDoc = await resolveTicketDoc(id);
+    if (!ticketDoc) {
       return res.status(404).json({
         success: false,
         message: 'Ticket not found',
       });
     }
 
+    const updateData = {};
+    if (status !== undefined) {
+      if (!VALID_STATUSES.has(status)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid status. Must be one of: ${Array.from(VALID_STATUSES).join(', ')}`,
+        });
+      }
+      updateData.status = status;
+      if (status === 'resolved') updateData.resolved_at = new Date().toISOString();
+      if (status === 'closed') updateData.closed_at = new Date().toISOString();
+    }
+    if (assigned_to !== undefined) updateData.assigned_to = assigned_to;
+    if (assigned_to_name !== undefined) updateData.assigned_to_name = assigned_to_name;
+    if (category !== undefined) updateData.category = category;
+    if (priority !== undefined) {
+      if (!VALID_PRIORITIES.has(priority)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid priority. Must be one of: ${Array.from(VALID_PRIORITIES).join(', ')}`,
+        });
+      }
+      updateData.priority = priority;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No fields to update. Provide at least one: status, assigned_to, assigned_to_name, category, or priority',
+      });
+    }
+    const updated = await erpUpdateDoc(ERP_TICKET_DOCTYPE, ticketDoc.name, updateData);
+
     res.json({
       success: true,
       data: {
-        ticket: result.rows[0],
+        ticket: mapTicketFromERP(updated || {}),
       },
     });
   } catch (error) {
     console.error('❌ Error updating ticket:', error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: 'Failed to update ticket',
       error: error.message,
@@ -737,46 +648,37 @@ app.post('/api/v1/support/tickets/:id/messages/read', async (req, res) => {
   try {
     const { id } = req.params;
     const { message_ids } = req.body;
-
-    // Check if id is a UUID or ticket_number
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const isUUID = uuidRegex.test(id);
-
-    let ticketId;
-    if (isUUID) {
-      ticketId = id;
-    } else {
-      // Get ticket ID from ticket_number
-      const ticketResult = await pool.query(
-        'SELECT id FROM tickets WHERE ticket_number = $1',
-        [id]
-      );
-      if (ticketResult.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          message: 'Ticket not found',
-        });
-      }
-      ticketId = ticketResult.rows[0].id;
+    const ticketDoc = await resolveTicketDoc(id);
+    if (!ticketDoc) {
+      return res.status(404).json({
+        success: false,
+        message: 'Ticket not found',
+      });
     }
 
-    if (message_ids && message_ids.length > 0) {
-      // Mark specific messages as read
-      await pool.query(
-        `UPDATE ticket_messages
-         SET is_read = TRUE, read_at = CURRENT_TIMESTAMP
-         WHERE ticket_id = $1 AND id = ANY($2)`,
-        [ticketId, message_ids]
-      );
+    let targets = [];
+    if (Array.isArray(message_ids) && message_ids.length > 0) {
+      const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
+        fields: ['name'],
+        filters: [['name', 'in', message_ids], ['ticket_id', '=', ticketDoc.name]],
+        limit: MAX_LIST_LIMIT,
+      });
+      targets = rows.map((r) => r.name);
     } else {
-      // Mark all agent messages as read
-      await pool.query(
-        `UPDATE ticket_messages
-         SET is_read = TRUE, read_at = CURRENT_TIMESTAMP
-         WHERE ticket_id = $1 AND sender_type = 'agent'`,
-        [ticketId]
-      );
+      const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
+        fields: ['name'],
+        filters: [['ticket_id', '=', ticketDoc.name], ['sender_type', '=', 'agent']],
+        limit: MAX_LIST_LIMIT,
+      });
+      targets = rows.map((r) => r.name);
     }
+
+    await Promise.all(targets.map((name) =>
+      erpUpdateDoc(ERP_MESSAGE_DOCTYPE, name, {
+        is_read: 1,
+        read_at: new Date().toISOString(),
+      })
+    ));
 
     res.json({
       success: true,
@@ -784,7 +686,7 @@ app.post('/api/v1/support/tickets/:id/messages/read', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Error marking messages as read:', error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
       message: 'Failed to mark messages as read',
       error: error.message,
