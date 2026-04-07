@@ -21,6 +21,7 @@ const ERP_BEARER_TOKEN = (process.env.ERP_BEARER_TOKEN || '').trim();
 
 const ERP_TICKET_DOCTYPE = (process.env.ERP_TICKET_DOCTYPE || 'Support Ticket').trim();
 const ERP_MESSAGE_DOCTYPE = (process.env.ERP_MESSAGE_DOCTYPE || 'Support Ticket Message').trim();
+const ERP_MESSAGE_TICKET_FIELD = (process.env.ERP_MESSAGE_TICKET_FIELD || 'ticket').trim();
 
 const MAX_LIST_LIMIT = 100;
 const VALID_STATUSES = new Set(['open', 'in_progress', 'resolved', 'closed']);
@@ -32,6 +33,7 @@ console.log('📄 .env file exists?', fs.existsSync(envPath) ? '✅ YES' : '❌ 
 console.log('🌐 ERP base URL:', ERP_BASE_URL || '❌ NOT SET');
 console.log('📦 Ticket DocType:', ERP_TICKET_DOCTYPE);
 console.log('📦 Message DocType:', ERP_MESSAGE_DOCTYPE);
+console.log('🔗 Message ticket field:', ERP_MESSAGE_TICKET_FIELD);
 
 if (!ERP_BASE_URL) {
   console.warn('⚠️ ERP_BASE_URL is not configured. API requests will fail until set.');
@@ -105,7 +107,7 @@ function mapMessageFromERP(doc) {
   const attachments = safeJsonParse(doc.attachments, []);
   return {
     id: doc.name,
-    ticket_id: doc.ticket_id || '',
+    ticket_id: doc[ERP_MESSAGE_TICKET_FIELD] || doc.ticket || doc.ticket_id || '',
     sender_type: doc.sender_type || 'user',
     sender_id: doc.sender_id || null,
     sender_name: doc.sender_name || '',
@@ -239,7 +241,7 @@ async function countUnreadAgentMessages(ticketId) {
   const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
     fields: ['name'],
     filters: [
-      ['ticket_id', '=', ticketId],
+      [ERP_MESSAGE_TICKET_FIELD, '=', ticketId],
       ['sender_type', '=', 'agent'],
       ['is_read', '=', 0],
     ],
@@ -415,8 +417,8 @@ app.get('/api/v1/support/tickets/:id', async (req, res) => {
     }
     const ticket = mapTicketFromERP(ticketDoc);
     const messageRows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
-      fields: ['name', 'ticket_id', 'sender_type', 'sender_id', 'sender_name', 'message', 'attachments', 'is_read', 'read_at', 'creation', 'modified'],
-      filters: [['ticket_id', '=', ticket.id]],
+      fields: ['name', ERP_MESSAGE_TICKET_FIELD, 'sender_type', 'sender_id', 'sender_name', 'message', 'attachments', 'is_read', 'read_at', 'creation', 'modified'],
+      filters: [[ERP_MESSAGE_TICKET_FIELD, '=', ticket.id]],
       orderBy: 'creation asc',
       limit: MAX_LIST_LIMIT,
       offset: 0,
@@ -493,7 +495,7 @@ app.post('/api/v1/support/tickets/:id/messages', async (req, res) => {
     }
 
     const created = await erpCreateDoc(ERP_MESSAGE_DOCTYPE, {
-      ticket_id: ticketId,
+      [ERP_MESSAGE_TICKET_FIELD]: ticketId,
       sender_type: finalSenderType,
       sender_id: finalSenderId,
       sender_name: finalSenderName,
@@ -539,14 +541,14 @@ app.get('/api/v1/support/tickets/:id/messages', async (req, res) => {
       });
     }
 
-    const filters = [['ticket_id', '=', ticketDoc.name]];
+    const filters = [[ERP_MESSAGE_TICKET_FIELD, '=', ticketDoc.name]];
     if (since) {
       const s = toIso(since, null);
       if (s) filters.push(['creation', '>', s]);
     }
 
     const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
-      fields: ['name', 'ticket_id', 'sender_type', 'sender_id', 'sender_name', 'message', 'attachments', 'is_read', 'read_at', 'creation', 'modified'],
+      fields: ['name', ERP_MESSAGE_TICKET_FIELD, 'sender_type', 'sender_id', 'sender_name', 'message', 'attachments', 'is_read', 'read_at', 'creation', 'modified'],
       filters,
       orderBy: 'creation asc',
       limit: limitNum,
@@ -662,14 +664,14 @@ app.post('/api/v1/support/tickets/:id/messages/read', async (req, res) => {
     if (Array.isArray(message_ids) && message_ids.length > 0) {
       const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
         fields: ['name'],
-        filters: [['name', 'in', message_ids], ['ticket_id', '=', ticketDoc.name]],
+        filters: [['name', 'in', message_ids], [ERP_MESSAGE_TICKET_FIELD, '=', ticketDoc.name]],
         limit: MAX_LIST_LIMIT,
       });
       targets = rows.map((r) => r.name);
     } else {
       const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
         fields: ['name'],
-        filters: [['ticket_id', '=', ticketDoc.name], ['sender_type', '=', 'agent']],
+        filters: [[ERP_MESSAGE_TICKET_FIELD, '=', ticketDoc.name], ['sender_type', '=', 'agent']],
         limit: MAX_LIST_LIMIT,
       });
       targets = rows.map((r) => r.name);
