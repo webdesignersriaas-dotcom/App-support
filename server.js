@@ -68,6 +68,12 @@ function toIso(value, fallback = null) {
   return Number.isNaN(d.getTime()) ? fallback : d.toISOString();
 }
 
+function toERPDatetime(value = new Date()) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 19).replace('T', ' ');
+}
+
 function safeJsonParse(value, fallback) {
   if (value == null) return fallback;
   if (typeof value === 'object') return value;
@@ -534,7 +540,7 @@ app.post('/api/v1/support/tickets/:id/messages', async (req, res) => {
       message,
       attachment: Array.isArray(attachments) && attachments.length > 0 ? attachments[0] : '',
       attachments: JSON.stringify(Array.isArray(attachments) ? attachments : []),
-      timestamp: new Date().toISOString(),
+      timestamp: toERPDatetime(),
       is_read: 0,
     });
 
@@ -637,8 +643,8 @@ app.patch('/api/v1/support/tickets/:id', async (req, res) => {
         });
       }
       updateData.status = toERPStatus(status);
-      if (status === 'resolved') updateData.resolved_at = new Date().toISOString();
-      if (status === 'closed') updateData.closed_at = new Date().toISOString();
+      if (status === 'resolved') updateData.resolved_at = toERPDatetime();
+      if (status === 'closed') updateData.closed_at = toERPDatetime();
     }
     if (assigned_to !== undefined) updateData.assigned_to = assigned_to;
     if (assigned_to_name !== undefined) updateData.assigned_to_name = assigned_to_name;
@@ -714,7 +720,7 @@ app.post('/api/v1/support/tickets/:id/messages/read', async (req, res) => {
     await Promise.all(targets.map((name) =>
       erpUpdateDoc(ERP_MESSAGE_DOCTYPE, name, {
         is_read: 1,
-        read_at: new Date().toISOString(),
+        read_at: toERPDatetime(),
       })
     ));
 
