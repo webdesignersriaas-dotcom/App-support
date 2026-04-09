@@ -5,14 +5,35 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 require('dotenv').config();
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
-app.use(cors());
-app.use(express.json());
+const CORS_ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((v) => v.trim())
+  .filter(Boolean);
+const REQUESTS_PER_WINDOW = Math.max(parseInt(process.env.REQUESTS_PER_WINDOW || '120', 10) || 120, 1);
+const REQUEST_WINDOW_MS = Math.max(parseInt(process.env.REQUEST_WINDOW_MS || '60000', 10) || 60000, 1000);
+
+const ipRateBucket = new Map();
+
+function corsOriginValidator(origin, callback) {
+  // Allow server-to-server and native/mobile requests with no browser origin.
+  if (!origin) return callback(null, true);
+  if (CORS_ALLOWED_ORIGINS.length === 0) return callback(null, true);
+  if (CORS_ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+  return callback(new Error('Origin not allowed by CORS'));
+}
+
+app.use(
+  cors({
+    origin: corsOriginValidator,
+  }),
+);
 
 const ERP_BASE_URL = normalizeBaseUrl(process.env.ERP_BASE_URL || '');
 const ERP_API_KEY = (process.env.ERP_API_KEY || '').trim();
@@ -22,6 +43,10 @@ const ERP_BEARER_TOKEN = (process.env.ERP_BEARER_TOKEN || '').trim();
 const ERP_TICKET_DOCTYPE = (process.env.ERP_TICKET_DOCTYPE || 'Support Ticket').trim();
 const ERP_MESSAGE_DOCTYPE = (process.env.ERP_MESSAGE_DOCTYPE || 'Support Ticket Message').trim();
 const ERP_MESSAGE_TICKET_FIELD = (process.env.ERP_MESSAGE_TICKET_FIELD || 'ticket').trim();
+const SUPPORT_APP_ID = (process.env.SUPPORT_APP_ID || '').trim();
+const SUPPORT_SIGNING_SECRET = (process.env.SUPPORT_SIGNING_SECRET || '').trim();
+const SUPPORT_ENFORCE_REQUEST_SIGNING = (process.env.SUPPORT_ENFORCE_REQUEST_SIGNING || 'true').trim().toLowerCase() !== 'false';
+const REQUEST_SIGNATURE_MAX_SKEW_MS = Math.max(parseInt(process.env.REQUEST_SIGNATURE_MAX_SKEW_MS || '300000', 10) || 300000, 1000);
 
 const MAX_LIST_LIMIT = 100;
 const VALID_STATUSES = new Set(['open', 'in_progress', 'resolved', 'closed', 'waiting_for_customer']);
@@ -40,6 +65,23 @@ if (!ERP_BASE_URL) {
 }
 if (!hasAuthConfigured()) {
   console.warn('⚠️ ERP auth is not configured. Set ERP_API_KEY+ERP_API_SECRET or ERP_BEARER_TOKEN.');
+}
+console.log(
+  `🛡️ Rate limit: ${REQUESTS_PER_WINDOW} req / ${REQUEST_WINDOW_MS}ms per IP`,
+);
+if (CORS_ALLOWED_ORIGINS.length > 0) {
+  console.log(`🌐 CORS allowlist enabled: ${CORS_ALLOWED_ORIGINS.join(', ')}`);
+} else {
+  console.warn('⚠️ CORS allowlist is empty; all origins are allowed.');
+}
+if (SUPPORT_ENFORCE_REQUEST_SIGNING) {
+  if (!SUPPORT_APP_ID || !SUPPORT_SIGNING_SECRET) {
+    console.warn('⚠️ Request signing is enabled but SUPPORT_APP_ID/SUPPORT_SIGNING_SECRET is missing.');
+  } else {
+    console.log('🔐 Support API request signing: ENABLED');
+  }
+} else {
+  console.warn('⚠️ Support API request signing is DISABLED. This is unsafe for production.');
 }
 
 function hasAuthConfigured() {
@@ -62,6 +104,12 @@ function authHeaders() {
   return {};
 }
 
+function rawBodySaver(req, res, buf) {
+  req.rawBody = buf ? buf.toString('utf8') : '';
+}
+
+app.use(express.json({ verify: rawBodySaver }));
+
 function toIso(value, fallback = null) {
   if (!value) return fallback;
   const d = new Date(value);
@@ -72,6 +120,110 @@ function toERPDatetime(value = new Date()) {
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function safeEqualText(a, b) {
+  const aBuf = Buffer.from(String(a || ''), 'utf8');
+  const bBuf = Buffer.from(String(b || ''), 'utf8');
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
+function computeRequestSignature({ method, pathOnly, timestamp, body }) {
+  const payload = `${method.toUpperCase()}\n${pathOnly}\n${timestamp}\n${body || ''}`;
+  return crypto
+      .createHmac('sha256', SUPPORT_SIGNING_SECRET)
+      .update(payload, 'utf8')
+      .digest('hex');
+}
+
+function verifySignedRequest(req, res, next) {
+  if (!SUPPORT_ENFORCE_REQUEST_SIGNING) return next();
+  if (!SUPPORT_APP_ID || !SUPPORT_SIGNING_SECRET) {
+    return res.status(503).json({
+      success: false,
+      message: 'API security misconfigured on server',
+    });
+  }
+
+  const clientAppId = (req.get('x-app-id') || '').trim();
+  const timestamp = (req.get('x-timestamp') || '').trim();
+  const signature = (req.get('x-signature') || '').trim().toLowerCase();
+
+  if (!clientAppId || !timestamp || !signature) {
+    return res.status(401).json({
+      success: false,
+      message: 'Missing authentication headers',
+    });
+  }
+
+  if (!safeEqualText(clientAppId, SUPPORT_APP_ID)) {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid app identity',
+    });
+  }
+
+  const requestTs = parseInt(timestamp, 10);
+  if (Number.isNaN(requestTs)) {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid timestamp',
+    });
+  }
+
+  const skew = Math.abs(Date.now() - requestTs);
+  if (skew > REQUEST_SIGNATURE_MAX_SKEW_MS) {
+    return res.status(401).json({
+      success: false,
+      message: 'Request expired',
+    });
+  }
+
+  const pathOnly = (req.originalUrl || req.path || '').split('?')[0];
+  const body = req.rawBody || '';
+  const expected = computeRequestSignature({
+    method: req.method,
+    pathOnly,
+    timestamp,
+    body,
+  });
+  if (!safeEqualText(signature, expected)) {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid request signature',
+    });
+  }
+
+  return next();
+}
+
+function applyRateLimit(req, res, next) {
+  const key = (req.ip || req.socket?.remoteAddress || 'unknown').toString();
+  const now = Date.now();
+  const current = ipRateBucket.get(key);
+
+  if (!current || now > current.resetAt) {
+    ipRateBucket.set(key, {
+      count: 1,
+      resetAt: now + REQUEST_WINDOW_MS,
+    });
+    return next();
+  }
+
+  current.count += 1;
+  if (current.count > REQUESTS_PER_WINDOW) {
+    const retryAfterSec = Math.max(
+      Math.ceil((current.resetAt - now) / 1000),
+      1,
+    );
+    res.setHeader('Retry-After', retryAfterSec.toString());
+    return res.status(429).json({
+      success: false,
+      message: 'Too many requests. Please try again shortly.',
+    });
+  }
+  return next();
 }
 
 function safeJsonParse(value, fallback) {
@@ -283,6 +435,8 @@ async function countUnreadAgentMessages(ticketId) {
 // ============================================
 // API ROUTES
 // ============================================
+
+app.use('/api/v1/support', applyRateLimit, verifySignedRequest);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

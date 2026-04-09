@@ -31,12 +31,36 @@ ERP_BEARER_TOKEN=
 # Optional DocType overrides
 ERP_TICKET_DOCTYPE=Support Ticket
 ERP_MESSAGE_DOCTYPE=Support Ticket Message
+
+# Request signing (recommended for production)
+SUPPORT_ENFORCE_REQUEST_SIGNING=true
+SUPPORT_APP_ID=your_mobile_app_id
+SUPPORT_SIGNING_SECRET=a_long_random_secret
+# Optional (default 300000 = 5 minutes)
+REQUEST_SIGNATURE_MAX_SKEW_MS=300000
+
+# Basic API protection (recommended)
+# Comma-separated browser origins; leave empty to allow all.
+CORS_ALLOWED_ORIGINS=https://yourapp.com,https://admin.yourapp.com
+# In-memory IP rate limiting defaults:
+REQUESTS_PER_WINDOW=120
+REQUEST_WINDOW_MS=60000
 ```
 
 3. Start server:
    - `npm start`
 4. Base URL locally:
    - `http://localhost:3000`
+
+### Flutter app signing config
+
+When request signing is enabled on the backend, run Flutter with matching defines:
+
+```bash
+flutter run \
+  --dart-define=SUPPORT_APP_ID=your_mobile_app_id \
+  --dart-define=SUPPORT_SIGNING_SECRET=a_long_random_secret
+```
 
 ## API Overview
 
