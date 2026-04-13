@@ -6,7 +6,6 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const prescriptionUploadRouter = require('./routes/prescription-upload');
 
 require('dotenv').config();
 
@@ -110,7 +109,6 @@ function rawBodySaver(req, res, buf) {
 }
 
 app.use(express.json({ verify: rawBodySaver }));
-app.use('/api/upload', prescriptionUploadRouter);
 
 function toIso(value, fallback = null) {
   if (!value) return fallback;
