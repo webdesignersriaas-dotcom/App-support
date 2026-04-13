@@ -6,6 +6,9 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const multer = require('multer');
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 require('dotenv').config();
 
@@ -283,6 +286,47 @@ function mapMessageFromERP(doc) {
     updated_at: toIso(doc.modified, new Date().toISOString()),
   };
 }
+
+const BUCKET = process.env.S3_BUCKET;
+const PRESCRIPTION_PREFIX = process.env.S3_PRESCRIPTION_PREFIX || 'prescriptions';
+const S3_PUBLIC_BASE_URL = (process.env.S3_PUBLIC_BASE_URL || '').trim();
+
+function ensureS3Config() {
+  const required = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'S3_BUCKET'];
+  const missing = required.filter((k) => !process.env[k]);
+  if (missing.length > 0) {
+    throw new Error(`Missing S3 env: ${missing.join(', ')}`);
+  }
+}
+
+let _s3Client = null;
+function getS3Client() {
+  ensureS3Config();
+  if (_s3Client) return _s3Client;
+  _s3Client = new S3Client({
+    region: process.env.AWS_REGION,
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    },
+  });
+  return _s3Client;
+}
+
+const uploadPrescription = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  fileFilter: (req, file, cb) => {
+    const allowedMime = /^(image\/(jpeg|jpg|pjpeg|png|gif|webp|heic|heif)|application\/pdf)$/i;
+    if (allowedMime.test(file.mimetype)) return cb(null, true);
+
+    const ext = (path.extname(file.originalname || '') || '').toLowerCase();
+    const allowedExt = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.pdf'];
+    if (allowedExt.includes(ext)) return cb(null, true);
+
+    return cb(new Error('Only images or PDF files are allowed.'), false);
+  },
+});
 
 async function erpFetch(pathname, { method = 'GET', body, query } = {}) {
   if (!ERP_BASE_URL) {
@@ -710,6 +754,82 @@ app.post('/api/v1/support/tickets/:id/messages', async (req, res) => {
       success: false,
       message: 'Failed to send message',
       error: error.message,
+    });
+  }
+});
+
+// Upload prescription file
+// POST /api/upload/prescription
+// Body: multipart/form-data with field "file" (image/pdf) and required "userId" (Shopify customer ID)
+app.post('/api/upload/prescription', uploadPrescription.single('file'), async (req, res) => {
+  try {
+    const s3Client = getS3Client();
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded. Use field name "file".' });
+    }
+
+    const rawUserId = req.query?.userId || req.query?.user_id || req.body?.userId || req.body?.user_id;
+    if (!rawUserId) {
+      return res.status(400).json({ error: 'Missing userId (Shopify customer ID).' });
+    }
+
+    const safeUserId = rawUserId.toString().replace(/\//g, '-');
+    const extFromName = (path.extname(req.file.originalname || '') || '').toLowerCase();
+    const isPdf = req.file.mimetype === 'application/pdf' || extFromName === '.pdf';
+    const mime = isPdf
+      ? 'application/pdf'
+      : (/^image\//.test(req.file.mimetype)
+          ? req.file.mimetype
+          : (extFromName === '.png'
+              ? 'image/png'
+              : extFromName === '.gif'
+                ? 'image/gif'
+              : extFromName === '.webp'
+                  ? 'image/webp'
+                : extFromName === '.heic'
+                  ? 'image/heic'
+                  : extFromName === '.heif'
+                    ? 'image/heif'
+                  : 'image/jpeg'));
+
+    const originalBaseName = path.basename(req.file.originalname || `prescription-${Date.now()}`, extFromName);
+    const safeBaseName = originalBaseName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const ext = isPdf ? '.pdf' : (extFromName || '.jpg');
+    const key = `${PRESCRIPTION_PREFIX}/${safeUserId}/${Date.now()}_${safeBaseName}${ext}`;
+
+    await s3Client.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+        Body: req.file.buffer,
+        ContentType: mime,
+      })
+    );
+
+    const baseUrl = S3_PUBLIC_BASE_URL;
+    let url;
+    if (baseUrl) {
+      url = baseUrl.replace(/\/$/, '') + '/' + key;
+    } else {
+      url = await getSignedUrl(
+        s3Client,
+        new GetObjectCommand({ Bucket: BUCKET, Key: key }),
+        { expiresIn: 60 * 60 * 24 * 6 }
+      );
+    }
+
+    res.status(201).json({
+      success: true,
+      url,
+      key,
+    });
+  } catch (err) {
+    console.error('[Prescription] Upload failed. Shopify customer ID:', req.query?.userId || req.query?.user_id || req.body?.userId || req.body?.user_id, err.message);
+    if (err.message && err.message.includes('Only images or PDF')) {
+      return res.status(400).json({ error: err.message });
+    }
+    res.status(500).json({
+      error: err.message || 'Upload failed',
     });
   }
 });
