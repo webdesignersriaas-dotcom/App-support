@@ -108,6 +108,23 @@ function authHeaders() {
   return {};
 }
 
+function erpRequestHeaders() {
+  const headers = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+    ...authHeaders(),
+  };
+  if (/ngrok-free\.dev|\.ngrok\.io|\.ngrok\.app/i.test(ERP_BASE_URL)) {
+    headers['ngrok-skip-browser-warning'] = 'true';
+  }
+  return headers;
+}
+
+function isHtmlErrorBody(text) {
+  const t = String(text || '');
+  return /<html|<!doctype|BrokenPipeError|Werkzeug Debugger/i.test(t);
+}
+
 function rawBodySaver(req, res, buf) {
   req.rawBody = buf ? buf.toString('utf8') : '';
 }
@@ -261,8 +278,9 @@ function sanitizeErpErrorMessage(raw) {
       if (title) {
         if (/BrokenPipeError/i.test(title)) {
           return (
-            'ERP connection error (BrokenPipe). Check ERP_BASE_URL on Render, ' +
-            'that the site is reachable (not site1.local without tunnel), and Support Ticket DocType exists.'
+            'ERP server error (BrokenPipe) when using Support Ticket DocType. ' +
+            'Frappe is crashing on site1.local — fix or recreate that DocType, or store tickets via ' +
+            'Mobile App User engagement_items (record_type Support Ticket) instead.'
           );
         }
         return title;
@@ -374,14 +392,19 @@ async function erpFetch(pathname, { method = 'GET', body, query } = {}) {
 
   const response = await fetch(url.toString(), {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders(),
-    },
+    headers: erpRequestHeaders(),
     body: body ? JSON.stringify(body) : undefined,
   });
 
   const text = await response.text();
+
+  if (isHtmlErrorBody(text)) {
+    const err = new Error(sanitizeErpErrorMessage(text));
+    err.status = 502;
+    err.payload = { message: text };
+    throw err;
+  }
+
   let parsed = null;
   try {
     parsed = text ? JSON.parse(text) : null;
