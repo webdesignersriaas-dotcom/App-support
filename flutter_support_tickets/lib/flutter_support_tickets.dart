@@ -1,0 +1,2046 @@
+import 'dart:convert';
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:crypto/crypto.dart';
+import 'package:http/http.dart' as http;
+
+typedef SupportTicketsResolveUser = SupportTicketsUser? Function(
+    BuildContext context);
+
+String formatSupportApiError(Object e) {
+  final raw = e.toString().replaceFirst('Exception: ', '').trim();
+  if (RegExp(r'<html|<!doctype', caseSensitive: false).hasMatch(raw)) {
+    final title = RegExp(
+      r'<title[^>]*>([^<]+)</title>',
+      caseSensitive: false,
+    ).firstMatch(raw)?.group(1);
+    if (title != null) {
+      final clean = title.split('//').first.trim();
+      if (clean.toLowerCase().contains('brokenpipe')) {
+        return 'ERP connection error. Check Render ERP_BASE_URL and Support Ticket DocType.';
+      }
+      return clean;
+    }
+    return 'Server error. ERP may be unreachable or misconfigured.';
+  }
+  return raw.length > 280 ? '${raw.substring(0, 280)}…' : raw;
+}
+
+void showSupportApiErrorSnack(BuildContext context, Object e) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(formatSupportApiError(e), maxLines: 4),
+      duration: const Duration(seconds: 5),
+    ),
+  );
+}
+
+class SupportTicketsConfig {
+  final String apiBaseUrl;
+  final String defaultAvatarUrlOrAsset;
+  final SupportTicketsResolveUser? resolveUser;
+  final String? appId;
+  final String? signingSecret;
+
+  const SupportTicketsConfig({
+    required this.apiBaseUrl,
+    required this.defaultAvatarUrlOrAsset,
+    this.resolveUser,
+    this.appId,
+    this.signingSecret,
+  });
+}
+
+class SupportTicketsUser {
+  final String id;
+  final String? name;
+  final String? firstName;
+  final String? email;
+  final String? phone;
+  final String? picture;
+  final String? userUrl;
+
+  const SupportTicketsUser({
+    required this.id,
+    this.name,
+    this.firstName,
+    this.email,
+    this.phone,
+    this.picture,
+    this.userUrl,
+  });
+}
+
+class SupportTicketsScope extends InheritedWidget {
+  final SupportTicketsConfig config;
+
+  const SupportTicketsScope({
+    super.key,
+    required this.config,
+    required super.child,
+  });
+
+  static SupportTicketsScope? of(BuildContext context) {
+    return context.dependOnInheritedWidgetOfExactType<SupportTicketsScope>();
+  }
+
+  @override
+  bool updateShouldNotify(covariant SupportTicketsScope oldWidget) {
+    return oldWidget.config != config;
+  }
+}
+
+class _Ticket {
+  final String id;
+  final String ticketNumber;
+  final String subject;
+  final String description;
+  final String status;
+  final String priority;
+  final String? category;
+  final int unreadMessageCount;
+  final DateTime? createdAt;
+
+  _Ticket({
+    required this.id,
+    required this.ticketNumber,
+    required this.subject,
+    required this.description,
+    required this.status,
+    required this.priority,
+    required this.category,
+    required this.unreadMessageCount,
+    required this.createdAt,
+  });
+
+  factory _Ticket.fromJson(Map<String, dynamic> j) {
+    return _Ticket(
+      id: (j['id'] ?? '').toString(),
+      ticketNumber: (j['ticket_number'] ?? j['id'] ?? '').toString(),
+      subject: (j['subject'] ?? '').toString(),
+      description: (j['description'] ?? '').toString(),
+      status: (j['status'] ?? 'open').toString(),
+      priority: (j['priority'] ?? 'medium').toString(),
+      category: j['category']?.toString(),
+      unreadMessageCount: (j['unread_message_count'] is num)
+          ? (j['unread_message_count'] as num).toInt()
+          : 0,
+      createdAt: DateTime.tryParse((j['created_at'] ?? '').toString()),
+    );
+  }
+}
+
+class _TicketMessage {
+  final String id;
+  final String ticketId;
+  final String senderType;
+  final String senderName;
+  final String message;
+  final DateTime? createdAt;
+
+  _TicketMessage({
+    required this.id,
+    required this.ticketId,
+    required this.senderType,
+    required this.senderName,
+    required this.message,
+    required this.createdAt,
+  });
+
+  factory _TicketMessage.fromJson(Map<String, dynamic> j) {
+    return _TicketMessage(
+      id: (j['id'] ?? '').toString(),
+      ticketId: (j['ticket_id'] ?? '').toString(),
+      senderType: (j['sender_type'] ?? 'user').toString(),
+      senderName: (j['sender_name'] ?? '').toString(),
+      message: (j['message'] ?? '').toString(),
+      createdAt: DateTime.tryParse((j['created_at'] ?? '').toString()),
+    );
+  }
+}
+
+class _SupportApiClient {
+  final String baseUrl;
+  final String appId;
+  final String signingSecret;
+
+  _SupportApiClient(
+    this.baseUrl, {
+    String? appId,
+    String? signingSecret,
+  })  : appId = (appId ?? '').trim(),
+        signingSecret = (signingSecret ?? '').trim();
+
+  Uri _uri(String path, [Map<String, String>? query]) {
+    final root = baseUrl.endsWith('/')
+        ? baseUrl.substring(0, baseUrl.length - 1)
+        : baseUrl;
+    return Uri.parse('$root$path').replace(queryParameters: query);
+  }
+
+  Map<String, String> _signedHeaders({
+    required String method,
+    required String path,
+    required String body,
+    bool includeContentType = false,
+  }) {
+    final headers = <String, String>{};
+    if (includeContentType) headers['Content-Type'] = 'application/json';
+    if (appId.isEmpty || signingSecret.isEmpty) return headers;
+
+    final timestamp = DateTime.now().millisecondsSinceEpoch.toString();
+    final payload = '${method.toUpperCase()}\n$path\n$timestamp\n$body';
+    final signature = Hmac(sha256, utf8.encode(signingSecret))
+        .convert(utf8.encode(payload))
+        .toString();
+    headers['x-app-id'] = appId;
+    headers['x-timestamp'] = timestamp;
+    headers['x-signature'] = signature;
+    return headers;
+  }
+
+  Future<Map<String, dynamic>> _parse(http.Response r) async {
+    final body = r.body.trim();
+    late final Map<String, dynamic> data;
+    try {
+      data = jsonDecode(body) as Map<String, dynamic>;
+    } catch (_) {
+      throw Exception(_sanitizeErrorText(body, statusCode: r.statusCode));
+    }
+    if (r.statusCode >= 200 && r.statusCode < 300) return data;
+    final message = (data['message'] ?? '').toString();
+    final details = (data['error'] ?? '').toString();
+    final msg = _bestErrorMessage(message, details);
+    throw Exception(msg);
+  }
+
+  String _sanitizeErrorText(String raw, {int? statusCode}) {
+    final text = raw.trim();
+    if (text.isEmpty) {
+      return statusCode != null
+          ? 'Request failed (HTTP $statusCode)'
+          : 'Request failed';
+    }
+    if (RegExp(r'<html|<!doctype', caseSensitive: false).hasMatch(text)) {
+      final title = RegExp(
+        r'<title[^>]*>([^<]+)</title>',
+        caseSensitive: false,
+      ).firstMatch(text)?.group(1);
+      if (title != null) {
+        final clean = title.split('//').first.trim();
+        if (clean.toLowerCase().contains('brokenpipe')) {
+          return 'ERP connection error. Ask admin to check Render ERP_BASE_URL '
+              'and Support Ticket DocType on ERP.';
+        }
+        return clean;
+      }
+      return 'Server error. ERP may be unreachable or misconfigured.';
+    }
+    return text.length > 220 ? '${text.substring(0, 220)}…' : text;
+  }
+
+  String _bestErrorMessage(String message, String details) {
+    final safeDetails = _sanitizeErrorText(details);
+    final safeMessage = _sanitizeErrorText(message);
+    if (safeDetails.isNotEmpty && safeDetails != 'Request failed') {
+      final mandatory = RegExp(r'MandatoryError:.*?:\s*([a-zA-Z0-9_]+)')
+          .firstMatch(safeDetails)
+          ?.group(1);
+      if (mandatory != null && mandatory.isNotEmpty) {
+        return 'Missing required field in ERP: $mandatory';
+      }
+      if (safeMessage.isEmpty ||
+          safeMessage.toLowerCase().startsWith('failed') ||
+          safeMessage.toLowerCase().contains('request failed')) {
+        return safeDetails;
+      }
+    }
+    if (safeMessage.isNotEmpty && safeMessage != 'Request failed') {
+      return safeMessage;
+    }
+    return safeDetails.isNotEmpty ? safeDetails : 'Request failed';
+  }
+
+  Future<List<_Ticket>> fetchTickets({
+    required String userId,
+    String? userEmail,
+    String? userPhone,
+    String? status,
+  }) async {
+    final q = <String, String>{
+      'page': '1',
+      'limit': '50',
+      if (userId.trim().isNotEmpty) 'user_id': userId,
+      if (userEmail != null && userEmail.trim().isNotEmpty)
+        'user_email': userEmail.trim(),
+      if (userPhone != null && userPhone.trim().isNotEmpty)
+        'user_phone': userPhone.trim(),
+      if (status != null && status.isNotEmpty) 'status': status,
+    };
+    const path = '/api/v1/support/tickets';
+    final r = await http.get(
+      _uri(path, q),
+      headers: _signedHeaders(method: 'GET', path: path, body: ''),
+    );
+    final data = await _parse(r);
+    final list = (data['data']?['tickets'] as List<dynamic>? ?? <dynamic>[]);
+    return list
+        .map((e) => _Ticket.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
+  }
+
+  Future<_Ticket> createTicket({
+    required SupportTicketsUser user,
+    required String subject,
+    required String description,
+    String priority = 'medium',
+    String? category,
+  }) async {
+    final resolvedName = (user.name ?? user.firstName ?? '').trim();
+    final resolvedEmail = (user.email ?? '').trim();
+    final resolvedPhone = (user.phone ?? '').trim();
+
+    final body = <String, dynamic>{
+      'user_id': user.id,
+      // Backend requires non-empty user fields.
+      'user_name': resolvedName.isNotEmpty ? resolvedName : 'User',
+      'user_email':
+          resolvedEmail.isNotEmpty ? resolvedEmail : '${user.id}@app.local',
+      'user_phone': resolvedPhone.isNotEmpty ? resolvedPhone : 'NA',
+      'subject': subject,
+      'description': description,
+      'priority': priority,
+      if (category != null && category.trim().isNotEmpty)
+        'category': category.trim(),
+    };
+    const path = '/api/v1/support/tickets';
+    final rawBody = jsonEncode(body);
+    final r = await http.post(
+      _uri(path),
+      headers: _signedHeaders(
+        method: 'POST',
+        path: path,
+        body: rawBody,
+        includeContentType: true,
+      ),
+      body: rawBody,
+    );
+    final data = await _parse(r);
+    return _Ticket.fromJson(
+        Map<String, dynamic>.from(data['data']['ticket'] as Map));
+  }
+
+  Future<List<_TicketMessage>> fetchMessages(
+      {required String ticketIdOrNumber}) async {
+    final path = '/api/v1/support/tickets/$ticketIdOrNumber/messages';
+    final r = await http.get(
+      _uri(path, <String, String>{
+        'page': '1',
+        'limit': '100',
+      }),
+      headers: _signedHeaders(method: 'GET', path: path, body: ''),
+    );
+    final data = await _parse(r);
+    final list = (data['data']?['messages'] as List<dynamic>? ?? <dynamic>[]);
+    return list
+        .map(
+            (e) => _TicketMessage.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
+  }
+
+  Future<_TicketMessage> sendUserMessage({
+    required String ticketIdOrNumber,
+    required SupportTicketsUser user,
+    required String message,
+  }) async {
+    final path = '/api/v1/support/tickets/$ticketIdOrNumber/messages';
+    final rawBody = jsonEncode(<String, dynamic>{
+      'message': message,
+      'user_id': user.id,
+      'user_name': user.name ?? user.firstName ?? 'User',
+      'attachments': <dynamic>[],
+    });
+    final r = await http.post(
+      _uri(path),
+      headers: _signedHeaders(
+        method: 'POST',
+        path: path,
+        body: rawBody,
+        includeContentType: true,
+      ),
+      body: rawBody,
+    );
+    final data = await _parse(r);
+    return _TicketMessage.fromJson(
+        Map<String, dynamic>.from(data['data']['message'] as Map));
+  }
+
+  Future<void> markMessagesRead({
+    required String ticketIdOrNumber,
+    List<String>? messageIds,
+  }) async {
+    final path = '/api/v1/support/tickets/$ticketIdOrNumber/messages/read';
+    final rawBody = jsonEncode(<String, dynamic>{
+      if (messageIds != null && messageIds.isNotEmpty)
+        'message_ids': messageIds,
+    });
+    final r = await http.post(
+      _uri(path),
+      headers: _signedHeaders(
+        method: 'POST',
+        path: path,
+        body: rawBody,
+        includeContentType: true,
+      ),
+      body: rawBody,
+    );
+    await _parse(r);
+  }
+}
+
+class TicketListScreen extends StatefulWidget {
+  final SupportTicketsUser? userOverride;
+
+  const TicketListScreen({super.key, this.userOverride});
+
+  @override
+  State<TicketListScreen> createState() => _TicketListScreenState();
+}
+
+enum _SupportView { dashboard, create, details }
+
+class _TicketListScreenState extends State<TicketListScreen> {
+  _SupportApiClient? _api;
+  SupportTicketsUser? _user;
+  bool _loading = true;
+  bool _sending = false;
+  String? _error;
+  List<_Ticket> _tickets = <_Ticket>[];
+  List<_TicketMessage> _messages = <_TicketMessage>[];
+  _SupportView _currentView = _SupportView.dashboard;
+  _Ticket? _selectedTicket;
+  String _selectedFilter = 'All';
+  String _newCategory = 'General';
+  String _newPriority = 'Normal priority';
+  final TextEditingController _subjectCtrl = TextEditingController();
+  final TextEditingController _descriptionCtrl = TextEditingController();
+  final TextEditingController _messageCtrl = TextEditingController();
+  Timer? _refreshTimer;
+
+  static const List<String> _filters = <String>[
+    'All',
+    'Open',
+    'In Progress',
+    'Resolved',
+    'Closed',
+  ];
+  static const List<String> _categories = <String>[
+    'General',
+    'Technical',
+    'Appointment',
+    'Payment',
+    'Other',
+  ];
+  static const List<String> _priorities = <String>[
+    'Low priority',
+    'Normal priority',
+    'High priority',
+  ];
+
+  final Color healthGreen = const Color(0xFF10B981);
+  final Color royalNavy = const Color(0xFF254063);
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final scope = SupportTicketsScope.of(context);
+    if (_api == null) {
+      _api = _SupportApiClient(
+        scope?.config.apiBaseUrl ?? '',
+        appId: scope?.config.appId,
+        signingSecret: scope?.config.signingSecret,
+      );
+      _user = widget.userOverride ?? scope?.config.resolveUser?.call(context);
+      _loadTickets();
+    }
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    _subjectCtrl.dispose();
+    _descriptionCtrl.dispose();
+    _messageCtrl.dispose();
+    super.dispose();
+  }
+
+  String _statusToApi(String ui) {
+    switch (ui) {
+      case 'Open':
+        return 'open';
+      case 'In Progress':
+        return 'in_progress';
+      case 'Resolved':
+        return 'resolved';
+      case 'Closed':
+        return 'closed';
+      default:
+        return '';
+    }
+  }
+
+  String _statusToUi(String api) {
+    switch (api) {
+      case 'open':
+        return 'Open';
+      case 'in_progress':
+        return 'In Progress';
+      case 'resolved':
+        return 'Resolved';
+      case 'closed':
+        return 'Closed';
+      default:
+        return api;
+    }
+  }
+
+  String _priorityToApi(String ui) {
+    switch (ui) {
+      case 'Low priority':
+        return 'low';
+      case 'High priority':
+        return 'high';
+      default:
+        return 'medium';
+    }
+  }
+
+  String _priorityToUi(String api) {
+    switch (api.toLowerCase()) {
+      case 'low':
+        return 'Low';
+      case 'high':
+        return 'High';
+      default:
+        return 'Normal';
+    }
+  }
+
+  String _monthShort(int month) {
+    const names = <String>[
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    if (month < 1 || month > 12) return '';
+    return names[month - 1];
+  }
+
+  String _formatTime(DateTime? dt) {
+    if (dt == null) return '';
+    final hour = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+    final minute = dt.minute.toString().padLeft(2, '0');
+    final suffix = dt.hour >= 12 ? 'PM' : 'AM';
+    return '$hour:$minute $suffix';
+  }
+
+  ({Color bg, Color text}) _priorityTagStyle(String priorityUi) {
+    switch (priorityUi) {
+      case 'High':
+        return (bg: const Color(0xFFFEE2E2), text: const Color(0xFFDC2626));
+      case 'Low':
+        return (bg: const Color(0xFF79F694), text: const Color(0xFF333333));
+      default:
+        return (bg: const Color(0xFFEDB678), text: const Color(0xFF333333));
+    }
+  }
+
+  Color _priorityTextColor(String priorityUi) {
+    if (priorityUi == 'High') return const Color(0xFFDC2626);
+    return const Color(0xFF333333);
+  }
+
+  ({Color bg, Color text}) _statusTagStyle(String statusUi) {
+    switch (statusUi) {
+      case 'Closed':
+        return (bg: const Color(0xFFE53935), text: Colors.white);
+      case 'In Progress':
+        return (bg: const Color(0xFFEDB678), text: const Color(0xFF333333));
+      case 'Open':
+        return (bg: const Color(0xFF79F694), text: const Color(0xFF333333));
+      default:
+        return (bg: const Color(0xFFE5E7EB), text: const Color(0xFFFF9800));
+    }
+  }
+
+  Future<void> _loadTickets() async {
+    final u = _user;
+    final hasId = (u?.id ?? '').trim().isNotEmpty;
+    final hasEmail = (u?.email ?? '').trim().isNotEmpty;
+    final hasPhone = (u?.phone ?? '').trim().isNotEmpty;
+    if (u == null || (!hasId && !hasEmail && !hasPhone)) {
+      setState(() {
+        _loading = false;
+        _error = 'Please login first to use support tickets.';
+      });
+      return;
+    }
+    try {
+      final status = _statusToApi(_selectedFilter);
+      final client = _api;
+      if (client == null) return;
+      final tickets = await client.fetchTickets(
+        userId: u.id,
+        userEmail: u.email,
+        userPhone: u.phone,
+        status: status.isEmpty ? null : status,
+      );
+      if (!mounted) return;
+      setState(() {
+        _tickets = tickets;
+        _loading = false;
+        _error = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = e.toString().replaceFirst('Exception: ', '');
+      });
+    }
+  }
+
+  Future<void> _submitTicket() async {
+    if (_user == null) return;
+    final subject = _subjectCtrl.text.trim();
+    final description = _descriptionCtrl.text.trim();
+    if (subject.isEmpty || description.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please fill subject and description')),
+      );
+      return;
+    }
+    try {
+      final client = _api;
+      if (client == null) return;
+      final t = await client.createTicket(
+        user: _user!,
+        subject: subject,
+        description: description,
+        category: _newCategory,
+        priority: _priorityToApi(_newPriority),
+      );
+      if (!mounted) return;
+      _subjectCtrl.clear();
+      _descriptionCtrl.clear();
+      setState(() {
+        _tickets = <_Ticket>[t, ..._tickets];
+        _currentView = _SupportView.dashboard;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      _showErrorSnack(e);
+    }
+  }
+
+  void _showErrorSnack(Object e) => showSupportApiErrorSnack(context, e);
+
+  Future<void> _openDetails(_Ticket t) async {
+    _refreshTimer?.cancel();
+    setState(() {
+      _selectedTicket = t;
+      _currentView = _SupportView.details;
+      _loading = true;
+      _messages = <_TicketMessage>[];
+    });
+    await _loadMessages(markRead: true);
+    _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      _loadMessages(markRead: true, silent: true);
+    });
+  }
+
+  Future<void> _loadMessages(
+      {bool markRead = false, bool silent = false}) async {
+    final t = _selectedTicket;
+    if (t == null) return;
+    if (!silent) setState(() => _loading = true);
+    try {
+      final client = _api;
+      if (client == null) return;
+      final out = await client.fetchMessages(ticketIdOrNumber: t.ticketNumber);
+      if (markRead) {
+        final ids = out
+            .where((m) => m.senderType == 'agent')
+            .map((m) => m.id)
+            .where((id) => id.isNotEmpty)
+            .toList();
+        if (ids.isNotEmpty) {
+          try {
+            await client.markMessagesRead(
+                ticketIdOrNumber: t.ticketNumber, messageIds: ids);
+          } catch (_) {}
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _messages = out;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      if (!silent) _showErrorSnack(e);
+    }
+  }
+
+  Future<void> _sendMessage() async {
+    final t = _selectedTicket;
+    if (t == null || _user == null) return;
+    final text = _messageCtrl.text.trim();
+    if (text.isEmpty || _sending) return;
+    setState(() => _sending = true);
+    try {
+      final client = _api;
+      if (client == null) return;
+      final msg = await client.sendUserMessage(
+        ticketIdOrNumber: t.ticketNumber,
+        user: _user!,
+        message: text,
+      );
+      if (!mounted) return;
+      _messageCtrl.clear();
+      setState(() {
+        _messages = <_TicketMessage>[..._messages, msg];
+        _sending = false;
+      });
+      await _loadMessages(markRead: true, silent: true);
+      await _loadTickets();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _sending = false);
+      _showErrorSnack(e);
+    }
+  }
+
+  PreferredSizeWidget _buildAppBar() {
+    String title = 'Support Tickets';
+    if (_currentView == _SupportView.create) title = 'Raise a Ticket';
+    if (_currentView == _SupportView.details) {
+      title = _selectedTicket?.subject ?? 'Ticket';
+    }
+
+    if (_currentView == _SupportView.details) {
+      return PreferredSize(
+        preferredSize: const Size.fromHeight(64),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: const BoxDecoration(
+            color: Color(0xFF254063),
+            borderRadius: BorderRadius.only(
+              bottomLeft: Radius.circular(24),
+              bottomRight: Radius.circular(24),
+            ),
+          ),
+          child: SafeArea(
+            bottom: false,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: <Widget>[
+                IconButton(
+                  icon: const Icon(
+                    Icons.arrow_back_ios_new,
+                    color: Colors.white,
+                    size: 22,
+                  ),
+                  onPressed: () async {
+                    _refreshTimer?.cancel();
+                    setState(() {
+                      _currentView = _SupportView.dashboard;
+                      _selectedTicket = null;
+                    });
+                    await _loadTickets();
+                  },
+                ),
+                const Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Support Agent',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 17,
+                        ),
+                      ),
+                      Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 3,
+                            backgroundColor: Color(0xFF34D399),
+                          ),
+                          SizedBox(width: 5),
+                          Text(
+                            'Online',
+                            style: TextStyle(
+                              color: Color(0xFFDBEAFE),
+                              fontWeight: FontWeight.w600,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox.shrink(),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return PreferredSize(
+      preferredSize: const Size.fromHeight(98),
+      child: Container(
+        padding: const EdgeInsets.only(top: 0, left: 8, right: 8, bottom: 20),
+        decoration: const BoxDecoration(
+          color: Color(0xFF254063),
+          borderRadius: BorderRadius.only(
+            bottomLeft: Radius.circular(24),
+            bottomRight: Radius.circular(24),
+          ),
+        ),
+        child: SafeArea(
+          bottom: false,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: <Widget>[
+              IconButton(
+                icon: const Icon(
+                  Icons.arrow_back_ios_new,
+                  color: Colors.white,
+                  size: 22,
+                ),
+                onPressed: () async {
+                  if (_currentView == _SupportView.dashboard) {
+                    Navigator.of(context).pop();
+                    return;
+                  }
+                  _refreshTimer?.cancel();
+                  setState(() {
+                    _currentView = _SupportView.dashboard;
+                    _selectedTicket = null;
+                  });
+                  await _loadTickets();
+                },
+              ),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 20,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 48),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFilterBar() {
+    return Container(
+      height: 60,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.06),
+            offset: const Offset(0, 6),
+            blurRadius: 12,
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        itemCount: _filters.length,
+        itemBuilder: (context, index) {
+          final filter = _filters[index];
+          final selected = _selectedFilter == filter;
+          return GestureDetector(
+            onTap: () async {
+              setState(() => _selectedFilter = filter);
+              await _loadTickets();
+            },
+            child: Container(
+              margin: const EdgeInsets.only(right: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: selected ? healthGreen : const Color(0xFFF1F5F9),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                filter,
+                style: TextStyle(
+                  color: selected ? Colors.white : const Color(0xFF64748B),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildDashboard() {
+    return Column(
+      children: <Widget>[
+        _buildFilterBar(),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: _loadTickets,
+            child: ListView(
+              physics: const AlwaysScrollableScrollPhysics(
+                parent: BouncingScrollPhysics(),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+              children: <Widget>[
+                const SizedBox(height: 6),
+                if (_tickets.isEmpty)
+                  Center(
+                      child: Padding(
+                    padding: const EdgeInsets.only(top: 80),
+                    child: Text(
+                      _error ?? 'No tickets found',
+                      textAlign: TextAlign.center,
+                    ),
+                  ))
+                else
+                  ..._tickets.map((t) {
+                    final statusUi = _statusToUi(t.status);
+                    final statusTag = _statusTagStyle(statusUi);
+                    final dateText = t.createdAt == null
+                        ? ''
+                        : '${_monthShort(t.createdAt!.month)} ${t.createdAt!.day.toString().padLeft(2, '0')}, ${t.createdAt!.year}';
+                    return GestureDetector(
+                      onTap: () => _openDetails(t),
+                      child: Container(
+                        margin: const EdgeInsets.only(bottom: 16),
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(15),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.04),
+                              offset: const Offset(0, 4),
+                              blurRadius: 10,
+                            ),
+                          ],
+                          border: Border.all(color: const Color(0xFFF1F5F9)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: <Widget>[
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: statusTag.bg,
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(
+                                    statusUi.toUpperCase(),
+                                    style: TextStyle(
+                                      color: statusTag.text,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                ),
+                                Text(
+                                  dateText,
+                                  style: const TextStyle(
+                                    color: Color(0xFF94A3B8),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 10),
+                            Text(t.subject,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w900,
+                                    fontSize: 31 / 2,
+                                    color: Color(0xFF1E293B))),
+                            const SizedBox(height: 4),
+                            Text(t.category ?? 'General',
+                                style: const TextStyle(
+                                    color: Color(0xFF94A3B8),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500)),
+                            const Divider(height: 24, color: Color(0xFFE2E8F0)),
+                            Row(
+                              children: <Widget>[
+                                Icon(
+                                  Icons.flag_rounded,
+                                  size: 14,
+                                  color: _priorityTextColor(
+                                      _priorityToUi(t.priority)),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${_priorityToUi(t.priority)} Priority',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: _priorityTextColor(
+                                        _priorityToUi(t.priority)),
+                                  ),
+                                ),
+                                const Spacer(),
+                                Text(
+                                  'View Discussion',
+                                  style: TextStyle(
+                                    color: healthGreen,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                                Icon(
+                                  Icons.chevron_right_rounded,
+                                  size: 16,
+                                  color: healthGreen,
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }),
+                const SizedBox(height: 90),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCreateForm() {
+    return Column(
+      children: <Widget>[
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text('Support Category',
+                    style:
+                        TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: _categories.map((cat) {
+                    final sel = _newCategory == cat;
+                    return GestureDetector(
+                      onTap: () => setState(() => _newCategory = cat),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: sel ? healthGreen : Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                              color:
+                                  sel ? healthGreen : const Color(0xFFE2E8F0)),
+                        ),
+                        child: Text(cat,
+                            style: TextStyle(
+                                color: sel
+                                    ? Colors.white
+                                    : const Color(0xFF64748B))),
+                      ),
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 20),
+                Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFE2E8F0)),
+                  ),
+                  child: TextField(
+                    controller: _subjectCtrl,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      color: Color(0xFF0F172A),
+                      fontWeight: FontWeight.w600,
+                    ),
+                    decoration: const InputDecoration(
+                      hintText: 'Subject',
+                      border: InputBorder.none,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 14,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFE2E8F0)),
+                  ),
+                  child: TextField(
+                    controller: _descriptionCtrl,
+                    minLines: 4,
+                    maxLines: 6,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      color: Color(0xFF0F172A),
+                      fontWeight: FontWeight.w600,
+                    ),
+                    decoration: const InputDecoration(
+                      hintText: 'Description',
+                      border: InputBorder.none,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 14,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Row(
+                  children: _priorities.map((p) {
+                    final sel = _newPriority == p;
+                    return Expanded(
+                      child: GestureDetector(
+                        onTap: () => setState(() => _newPriority = p),
+                        child: Container(
+                          margin: EdgeInsets.only(right: p == 'Urgent' ? 0 : 8),
+                          height: 48,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: sel
+                                ? healthGreen.withValues(alpha: 0.1)
+                                : Colors.white,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                                color: sel
+                                    ? healthGreen
+                                    : const Color(0xFFE2E8F0)),
+                          ),
+                          child: Text(p),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
+          ),
+        ),
+        Container(
+          color: Colors.white,
+          padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+          child: SizedBox(
+            width: double.infinity,
+            height: 56,
+            child: ElevatedButton(
+              onPressed: _submitTicket,
+              style: ElevatedButton.styleFrom(backgroundColor: healthGreen),
+              child: const Text('Submit Ticket',
+                  style: TextStyle(color: Colors.white)),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDetails() {
+    final t = _selectedTicket;
+    if (t == null) return const SizedBox.shrink();
+    final statusUi = _statusToUi(t.status);
+    final priorityUi = _priorityToUi(t.priority);
+    final categoryText = (t.category == null || t.category!.trim().isEmpty)
+        ? 'General'
+        : t.category!;
+    return Column(
+      children: <Widget>[
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border(
+                bottom:
+                    BorderSide(color: Colors.black.withValues(alpha: 0.05))),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color:
+                              const Color(0xFF10B981).withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          categoryText,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF10B981),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      SizedBox(
+                        width: MediaQuery.of(context).size.width * 0.62,
+                        child: Text(
+                          t.subject,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xFF0F172A),
+                            letterSpacing: -0.5,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF10B981).withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      priorityUi.toUpperCase() == 'LOW'
+                          ? 'OPEN'
+                          : statusUi.toUpperCase(),
+                      style: const TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF10B981)),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                t.description.isEmpty ? '-' : t.description,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Colors.grey[600],
+                  fontWeight: FontWeight.w500,
+                  height: 1.4,
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: _loading
+              ? const Center(child: CircularProgressIndicator())
+              : RefreshIndicator(
+                  onRefresh: () => _loadMessages(markRead: true),
+                  child: ListView.builder(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 24),
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      final m = _messages[index];
+                      final isUser = m.senderType != 'agent';
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 20),
+                        child: Row(
+                          mainAxisAlignment: isUser
+                              ? MainAxisAlignment.end
+                              : MainAxisAlignment.start,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            if (!isUser) ...[
+                              CircleAvatar(
+                                radius: 16,
+                                backgroundColor:
+                                    healthGreen.withValues(alpha: 0.1),
+                                child: const Icon(Icons.support_agent,
+                                    color: Color(0xFF10B981), size: 16),
+                              ),
+                              const SizedBox(width: 12),
+                            ],
+                            Flexible(
+                              child: Column(
+                                crossAxisAlignment: isUser
+                                    ? CrossAxisAlignment.end
+                                    : CrossAxisAlignment.start,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(16),
+                                    constraints: BoxConstraints(
+                                        maxWidth:
+                                            MediaQuery.of(context).size.width *
+                                                0.75),
+                                    decoration: BoxDecoration(
+                                      color: isUser
+                                          ? const Color(0xFF0F172A)
+                                          : Colors.white,
+                                      borderRadius: BorderRadius.only(
+                                        topLeft: const Radius.circular(20),
+                                        topRight: const Radius.circular(20),
+                                        bottomLeft:
+                                            Radius.circular(isUser ? 20 : 0),
+                                        bottomRight:
+                                            Radius.circular(isUser ? 0 : 20),
+                                      ),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.black
+                                              .withValues(alpha: 0.03),
+                                          blurRadius: 10,
+                                          offset: const Offset(0, 5),
+                                        ),
+                                      ],
+                                    ),
+                                    child: Text(
+                                      m.message,
+                                      style: TextStyle(
+                                        color: isUser
+                                            ? Colors.white
+                                            : const Color(0xFF334155),
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w500,
+                                        height: 1.4,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    _formatTime(m.createdAt),
+                                    style: const TextStyle(
+                                      color: Color(0xFF94A3B8),
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            if (isUser) const SizedBox(width: 12),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+        ),
+        Container(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.05),
+                blurRadius: 20,
+                offset: const Offset(0, -5),
+              ),
+            ],
+          ),
+          child: Row(
+            children: <Widget>[
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF1F5F9),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: IconButton(
+                  icon: const Icon(Icons.add_rounded, color: Color(0xFF64748B)),
+                  onPressed: () {},
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  decoration: BoxDecoration(
+                      color: const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(16)),
+                  child: TextField(
+                    controller: _messageCtrl,
+                    style: const TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w500),
+                    decoration: const InputDecoration(
+                      hintText: 'Type your message...',
+                      hintStyle: TextStyle(color: Color(0xFF94A3B8)),
+                      border: InputBorder.none,
+                    ),
+                    onSubmitted: (_) => _sendMessage(),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              GestureDetector(
+                onTap: _sending ? null : _sendMessage,
+                child: Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: healthGreen,
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [
+                      BoxShadow(
+                        color: healthGreen.withValues(alpha: 0.3),
+                        blurRadius: 10,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: _sending
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.send_rounded,
+                          color: Colors.white, size: 20),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final body = switch (_currentView) {
+      _SupportView.dashboard => _buildDashboard(),
+      _SupportView.create => _buildCreateForm(),
+      _SupportView.details => _buildDetails(),
+    };
+    return PopScope(
+      canPop: _currentView == _SupportView.dashboard,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop || _currentView == _SupportView.dashboard) return;
+        _refreshTimer?.cancel();
+        setState(() {
+          _currentView = _SupportView.dashboard;
+          _selectedTicket = null;
+        });
+        await _loadTickets();
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFFF8FAFC),
+        appBar: _buildAppBar(),
+        body: body,
+        floatingActionButton: _currentView == _SupportView.dashboard
+            ? FloatingActionButton.extended(
+                onPressed: () =>
+                    setState(() => _currentView = _SupportView.create),
+                backgroundColor: healthGreen,
+                icon:
+                    const Icon(Icons.add_comment_rounded, color: Colors.white),
+                label: const Text('New Ticket',
+                    style: TextStyle(color: Colors.white)),
+              )
+            : null,
+      ),
+    );
+  }
+}
+
+class _TicketChatScreen extends StatefulWidget {
+  final _SupportApiClient api;
+  final SupportTicketsUser user;
+  final _Ticket ticket;
+
+  const _TicketChatScreen({
+    required this.api,
+    required this.user,
+    required this.ticket,
+  });
+
+  @override
+  State<_TicketChatScreen> createState() => _TicketChatScreenState();
+}
+
+class _TicketChatScreenState extends State<_TicketChatScreen> {
+  final TextEditingController _messageCtrl = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  bool _loading = true;
+  bool _sending = false;
+  List<_TicketMessage> _messages = <_TicketMessage>[];
+  Timer? _refreshTimer;
+  static const Duration _refreshEvery = Duration(seconds: 5);
+  static const Color healthGreen = Color(0xFF10B981);
+
+  String _statusToUi(String api) {
+    final s = api.toLowerCase().trim();
+    if (s == 'open') return 'In Progress';
+    if (s == 'closed') return 'Resolved';
+    if (s == 'pending') return 'Waiting';
+    return api.isEmpty ? 'Unknown' : api;
+  }
+
+  ({Color bg, Color text}) _statusTagStyle(String statusUi) {
+    switch (statusUi.toLowerCase()) {
+      case 'resolved':
+        return (bg: const Color(0xFFDCFCE7), text: const Color(0xFF166534));
+      case 'waiting':
+        return (bg: const Color(0xFFFFEDD5), text: const Color(0xFF9A3412));
+      case 'in progress':
+        return (bg: const Color(0xFFDBEAFE), text: const Color(0xFF1E40AF));
+      default:
+        return (bg: const Color(0xFFE2E8F0), text: const Color(0xFF334155));
+    }
+  }
+
+  String _monthShort(int month) {
+    const names = [
+      '',
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec'
+    ];
+    if (month < 1 || month > 12) return '---';
+    return names[month];
+  }
+
+  String _formatTime(DateTime? dt) {
+    if (dt == null) return '';
+    final h24 = dt.hour;
+    final m = dt.minute.toString().padLeft(2, '0');
+    final ampm = h24 >= 12 ? 'PM' : 'AM';
+    final h12 = h24 % 12 == 0 ? 12 : h24 % 12;
+    return '$h12:$m $ampm';
+  }
+
+  String _priorityToUi(String api) {
+    final s = api.toLowerCase().trim();
+    if (s == 'low') return 'Low';
+    if (s == 'medium') return 'Medium';
+    if (s == 'high') return 'High';
+    if (s == 'urgent') return 'Urgent';
+    return api.isEmpty ? 'Normal' : api;
+  }
+
+  ({Color bg, Color text}) _priorityTagStyle(String priorityUi) {
+    switch (priorityUi.toLowerCase()) {
+      case 'low':
+        return (bg: const Color(0xFFDCFCE7), text: const Color(0xFF166534));
+      case 'medium':
+        return (bg: const Color(0xFFFEF3C7), text: const Color(0xFF92400E));
+      case 'high':
+        return (bg: const Color(0xFFFEE2E2), text: const Color(0xFF991B1B));
+      case 'urgent':
+        return (bg: const Color(0xFFFFE4E6), text: const Color(0xFFBE123C));
+      default:
+        return (bg: const Color(0xFFE2E8F0), text: const Color(0xFF334155));
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMessages(markRead: true);
+    _refreshTimer = Timer.periodic(_refreshEvery, (_) {
+      _loadMessages(markRead: true, silent: true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    _messageCtrl.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _markReadForAgentMessages(List<_TicketMessage> messages) async {
+    final ids = messages
+        .where((m) => m.senderType == 'agent')
+        .map((m) => m.id)
+        .where((id) => id.isNotEmpty)
+        .toList();
+    if (ids.isEmpty) return;
+    try {
+      await widget.api.markMessagesRead(
+        ticketIdOrNumber: widget.ticket.ticketNumber,
+        messageIds: ids,
+      );
+    } catch (_) {
+      // Best-effort: read state sync should never block chat rendering.
+    }
+  }
+
+  Future<void> _loadMessages(
+      {bool markRead = false, bool silent = false}) async {
+    if (!silent) {
+      setState(() => _loading = true);
+    }
+    try {
+      final out = await widget.api
+          .fetchMessages(ticketIdOrNumber: widget.ticket.ticketNumber);
+      if (markRead) {
+        await _markReadForAgentMessages(out);
+      }
+      if (!mounted) return;
+      setState(() {
+        _messages = out;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      if (!silent) showSupportApiErrorSnack(context, e);
+    }
+  }
+
+  Future<void> _send() async {
+    final text = _messageCtrl.text.trim();
+    if (text.isEmpty || _sending) return;
+    setState(() => _sending = true);
+    try {
+      final m = await widget.api.sendUserMessage(
+        ticketIdOrNumber: widget.ticket.ticketNumber,
+        user: widget.user,
+        message: text,
+      );
+      if (!mounted) return;
+      _messageCtrl.clear();
+      setState(() {
+        _messages = <_TicketMessage>[..._messages, m];
+        _sending = false;
+      });
+      Timer(const Duration(milliseconds: 100), () {
+        if (!_scrollController.hasClients) return;
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      });
+      await _loadMessages(markRead: true, silent: true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _sending = false);
+      showSupportApiErrorSnack(context, e);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final statusUi = _statusToUi(widget.ticket.status);
+    final priorityUi = _priorityToUi(widget.ticket.priority);
+    final dateText = widget.ticket.createdAt == null
+        ? '-'
+        : '${_monthShort(widget.ticket.createdAt!.month)} ${widget.ticket.createdAt!.day.toString().padLeft(2, '0')}, ${widget.ticket.createdAt!.year}';
+    final categoryText = (widget.ticket.category == null ||
+            widget.ticket.category!.trim().isEmpty)
+        ? 'General'
+        : widget.ticket.category!;
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFF8FAFC),
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new,
+              color: Color(0xFF0F172A), size: 18),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        title: Row(
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: healthGreen.withValues(alpha: 0.1),
+              child: const Icon(Icons.support_agent_rounded,
+                  color: Color(0xFF10B981), size: 20),
+            ),
+            const SizedBox(width: 12),
+            const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Support Agent',
+                  style: TextStyle(
+                    color: Color(0xFF0F172A),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: -0.5,
+                  ),
+                ),
+                Row(
+                  children: [
+                    CircleAvatar(radius: 3, backgroundColor: Color(0xFF10B981)),
+                    SizedBox(width: 4),
+                    Text(
+                      'Online',
+                      style: TextStyle(
+                        color: Colors.grey,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.videocam_outlined, color: Color(0xFF64748B)),
+            onPressed: () {},
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+      body: Column(
+        children: <Widget>[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border(
+                  bottom:
+                      BorderSide(color: Colors.black.withValues(alpha: 0.05))),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Text(
+                              'TICKET ${widget.ticket.ticketNumber.toUpperCase()}',
+                              style: const TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                                color: Color(0xFF64748B),
+                                letterSpacing: 1,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF6366F1)
+                                    .withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                categoryText,
+                                style: const TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w800,
+                                  color: Color(0xFF6366F1),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        SizedBox(
+                          width: MediaQuery.of(context).size.width * 0.62,
+                          child: Text(
+                            widget.ticket.subject.isEmpty
+                                ? 'Ticket Details'
+                                : widget.ticket.subject,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                              color: Color(0xFF0F172A),
+                              letterSpacing: -0.5,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF10B981).withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        statusUi.toUpperCase() == 'IN PROGRESS'
+                            ? 'OPEN'
+                            : statusUi.toUpperCase(),
+                        style: const TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF10B981),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  widget.ticket.description.isEmpty
+                      ? '-'
+                      : widget.ticket.description,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey[600],
+                    fontWeight: FontWeight.w500,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : RefreshIndicator(
+                    onRefresh: () => _loadMessages(markRead: true),
+                    child: ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 24),
+                      itemCount: _messages.length,
+                      itemBuilder: (ctx, i) {
+                        final m = _messages[i];
+                        final isUser = m.senderType != 'agent';
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 20),
+                          child: Row(
+                            mainAxisAlignment: isUser
+                                ? MainAxisAlignment.end
+                                : MainAxisAlignment.start,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              if (!isUser) ...[
+                                CircleAvatar(
+                                  radius: 16,
+                                  backgroundColor:
+                                      healthGreen.withValues(alpha: 0.1),
+                                  child: const Icon(Icons.support_agent,
+                                      color: Color(0xFF10B981), size: 16),
+                                ),
+                                const SizedBox(width: 12),
+                              ],
+                              Flexible(
+                                child: Column(
+                                  crossAxisAlignment: isUser
+                                      ? CrossAxisAlignment.end
+                                      : CrossAxisAlignment.start,
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.all(16),
+                                      constraints: BoxConstraints(
+                                          maxWidth: MediaQuery.of(context)
+                                                  .size
+                                                  .width *
+                                              0.75),
+                                      decoration: BoxDecoration(
+                                        color: isUser
+                                            ? const Color(0xFF0F172A)
+                                            : Colors.white,
+                                        borderRadius: BorderRadius.only(
+                                          topLeft: const Radius.circular(20),
+                                          topRight: const Radius.circular(20),
+                                          bottomLeft:
+                                              Radius.circular(isUser ? 20 : 0),
+                                          bottomRight:
+                                              Radius.circular(isUser ? 0 : 20),
+                                        ),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black
+                                                .withValues(alpha: 0.03),
+                                            blurRadius: 10,
+                                            offset: const Offset(0, 5),
+                                          ),
+                                        ],
+                                      ),
+                                      child: Text(
+                                        m.message,
+                                        style: TextStyle(
+                                          color: isUser
+                                              ? Colors.white
+                                              : const Color(0xFF334155),
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w500,
+                                          height: 1.4,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      _formatTime(m.createdAt),
+                                      style: const TextStyle(
+                                        color: Color(0xFF94A3B8),
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (isUser) const SizedBox(width: 12),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+          ),
+          SafeArea(
+            top: false,
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.05),
+                    blurRadius: 20,
+                    offset: const Offset(0, -5),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: IconButton(
+                      icon: const Icon(Icons.add_rounded,
+                          color: Color(0xFF64748B)),
+                      onPressed: () {},
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF1F5F9),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: TextField(
+                        controller: _messageCtrl,
+                        style: const TextStyle(
+                            fontSize: 14, fontWeight: FontWeight.w500),
+                        decoration: const InputDecoration(
+                          hintText: 'Type your message...',
+                          hintStyle: TextStyle(color: Color(0xFF94A3B8)),
+                          border: InputBorder.none,
+                        ),
+                        onSubmitted: (_) => _send(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  GestureDetector(
+                    onTap: _sending ? null : _send,
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: healthGreen,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                            color: healthGreen.withValues(alpha: 0.3),
+                            blurRadius: 10,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: _sending
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.send_rounded,
+                              color: Colors.white, size: 20),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

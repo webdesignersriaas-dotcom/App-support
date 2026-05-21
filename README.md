@@ -38,6 +38,8 @@ SUPPORT_APP_ID=your_mobile_app_id
 SUPPORT_SIGNING_SECRET=a_long_random_secret
 # Optional (default 300000 = 5 minutes)
 REQUEST_SIGNATURE_MAX_SKEW_MS=300000
+# Optional server-to-server key (ERP automations/tools can use this instead of signed headers)
+SUPPORT_SERVER_API_KEY=replace_with_long_random_server_key
 
 # Basic API protection (recommended)
 # Comma-separated browser origins; leave empty to allow all.
@@ -61,6 +63,16 @@ flutter run \
   --dart-define=SUPPORT_APP_ID=your_mobile_app_id \
   --dart-define=SUPPORT_SIGNING_SECRET=a_long_random_secret
 ```
+
+### ERP / agent integrations via this API
+
+If ERP-side tools/automations need to call this API directly, send:
+
+```http
+x-server-api-key: <SUPPORT_SERVER_API_KEY>
+```
+
+This bypasses mobile signed-header auth for trusted server-to-server callers only.
 
 ## API Overview
 

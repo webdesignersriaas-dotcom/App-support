@@ -47,6 +47,7 @@ const SUPPORT_APP_ID = (process.env.SUPPORT_APP_ID || '').trim();
 const SUPPORT_SIGNING_SECRET = (process.env.SUPPORT_SIGNING_SECRET || '').trim();
 const SUPPORT_ENFORCE_REQUEST_SIGNING = (process.env.SUPPORT_ENFORCE_REQUEST_SIGNING || 'true').trim().toLowerCase() !== 'false';
 const REQUEST_SIGNATURE_MAX_SKEW_MS = Math.max(parseInt(process.env.REQUEST_SIGNATURE_MAX_SKEW_MS || '300000', 10) || 300000, 1000);
+const SUPPORT_SERVER_API_KEY = (process.env.SUPPORT_SERVER_API_KEY || '').trim();
 
 const MAX_LIST_LIMIT = 100;
 const VALID_STATUSES = new Set(['open', 'in_progress', 'resolved', 'closed', 'waiting_for_customer']);
@@ -82,6 +83,9 @@ if (SUPPORT_ENFORCE_REQUEST_SIGNING) {
   }
 } else {
   console.warn('⚠️ Support API request signing is DISABLED. This is unsafe for production.');
+}
+if (SUPPORT_SERVER_API_KEY) {
+  console.log('🔑 Server API key auth: ENABLED');
 }
 
 function hasAuthConfigured() {
@@ -138,6 +142,12 @@ function computeRequestSignature({ method, pathOnly, timestamp, body }) {
 }
 
 function verifySignedRequest(req, res, next) {
+  // Allow trusted server-to-server clients (ERP automations, backend jobs) with a static key.
+  const serverApiKey = (req.get('x-server-api-key') || '').trim();
+  if (SUPPORT_SERVER_API_KEY && safeEqualText(serverApiKey, SUPPORT_SERVER_API_KEY)) {
+    return next();
+  }
+
   if (!SUPPORT_ENFORCE_REQUEST_SIGNING) return next();
   if (!SUPPORT_APP_ID || !SUPPORT_SIGNING_SECRET) {
     return res.status(503).json({
@@ -237,6 +247,70 @@ function safeJsonParse(value, fallback) {
   }
 }
 
+function sanitizeErpErrorMessage(raw) {
+  let text = String(raw || '').trim();
+  if (!text) return 'ERP request failed';
+
+  const isHtml = /<html|<!doctype/i.test(text);
+  if (isHtml || text.length > 600) {
+    const titleMatch = text.match(/<title[^>]*>([^<]+)<\/title>/i);
+    if (titleMatch) {
+      const title = titleMatch[1]
+        .replace(/\s*\/\/\s*Werkzeug Debugger/i, '')
+        .trim();
+      if (title) {
+        if (/BrokenPipeError/i.test(title)) {
+          return (
+            'ERP connection error (BrokenPipe). Check ERP_BASE_URL on Render, ' +
+            'that the site is reachable (not site1.local without tunnel), and Support Ticket DocType exists.'
+          );
+        }
+        return title;
+      }
+    }
+    return (
+      'ERP returned an HTML error page. Verify ERP_BASE_URL, API key permissions, ' +
+      'and that Support Ticket / Support Ticket Message DocTypes exist.'
+    );
+  }
+
+  if (text.length > 280) text = `${text.slice(0, 280)}…`;
+  return text;
+}
+
+function extractFrappeError(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+
+  if (typeof payload.exc === 'string' && payload.exc.trim()) {
+    const lines = payload.exc.split('\n').map((l) => l.trim()).filter(Boolean);
+    const last = lines[lines.length - 1] || payload.exc;
+    return last.replace(/^frappe\.exceptions\.[A-Za-z]+:\s*/i, '');
+  }
+
+  if (payload._server_messages) {
+    try {
+      const raw = typeof payload._server_messages === 'string'
+        ? JSON.parse(payload._server_messages)
+        : payload._server_messages;
+      if (Array.isArray(raw) && raw.length > 0) {
+        const last = raw[raw.length - 1];
+        if (typeof last === 'string') {
+          const parsed = JSON.parse(last);
+          return parsed?.message || last;
+        }
+      }
+    } catch (_) {
+      // ignore parse errors
+    }
+  }
+
+  if (typeof payload.message === 'string' && payload.message.trim()) {
+    return payload.message;
+  }
+
+  return null;
+}
+
 function mapTicketFromERP(doc) {
   const statusRaw = (doc.status || '').toString().trim();
   const statusNorm = statusRaw.toLowerCase().replace(/\s+/g, '_');
@@ -316,7 +390,11 @@ async function erpFetch(pathname, { method = 'GET', body, query } = {}) {
   }
 
   if (!response.ok) {
-    const message = parsed?.message || parsed?.exc || `ERPNext request failed: ${response.status}`;
+    const message = sanitizeErpErrorMessage(
+      extractFrappeError(parsed) ||
+        parsed?.message ||
+        `ERPNext request failed: ${response.status}`,
+    );
     const err = new Error(message);
     err.status = response.status;
     err.payload = parsed;
@@ -521,7 +599,7 @@ app.post('/api/v1/support/tickets', async (req, res) => {
     return res.status(error.status || 500).json({
       success: false,
       message: 'Failed to create ticket',
-      error: error.message,
+      error: sanitizeErpErrorMessage(error.message),
     });
   }
 });
