@@ -18,7 +18,8 @@ String formatSupportApiError(Object e) {
     if (title != null) {
       final clean = title.split('//').first.trim();
       if (clean.toLowerCase().contains('brokenpipe')) {
-        return 'ERP connection error. Check Render ERP_BASE_URL and Support Ticket DocType.';
+        return 'ERP error: Support Ticket DocType crashes on Frappe. '
+            'Ask ERP admin to fix the DocType or use engagement_items tickets.';
       }
       return clean;
     }
