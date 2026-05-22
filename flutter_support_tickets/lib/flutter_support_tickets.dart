@@ -1038,8 +1038,9 @@ class _TicketListScreenState extends State<TicketListScreen> {
                     final unreadCount = _ticketUnreadCounts[_ticketKey(t)] ??
                         t.unreadMessageCount;
                     final hasUnread = unreadCount > 0;
-                    final notificationText =
-                        unreadCount > 99 ? '99+' : '$unreadCount';
+                    final replyText = unreadCount == 1
+                        ? '1 agent replied'
+                        : '$unreadCount agent replied';
                     final dateText = t.createdAt == null
                         ? ''
                         : '${_monthShort(t.createdAt!.month)} ${t.createdAt!.day.toString().padLeft(2, '0')}, ${t.createdAt!.year}';
@@ -1086,13 +1087,30 @@ class _TicketListScreenState extends State<TicketListScreen> {
                                         ),
                                       ),
                                     ),
-                                    Text(
-                                      dateText,
-                                      style: const TextStyle(
-                                        color: Color(0xFF94A3B8),
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w500,
-                                      ),
+                                    Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.end,
+                                      children: [
+                                        Text(
+                                          dateText,
+                                          style: const TextStyle(
+                                            color: Color(0xFF94A3B8),
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                        if (hasUnread) ...[
+                                          const SizedBox(height: 3),
+                                          Text(
+                                            replyText,
+                                            style: TextStyle(
+                                              color: healthGreen,
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w900,
+                                            ),
+                                          ),
+                                        ],
+                                      ],
                                     ),
                                   ],
                                 ),
@@ -1146,51 +1164,6 @@ class _TicketListScreenState extends State<TicketListScreen> {
                                 ),
                               ],
                             ),
-                            if (hasUnread)
-                              Positioned(
-                                top: -10,
-                                right: -10,
-                                child: Container(
-                                  constraints: const BoxConstraints(
-                                    minWidth: 24,
-                                    minHeight: 24,
-                                  ),
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 7,
-                                    vertical: 4,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: healthGreen,
-                                    shape: notificationText.length > 2
-                                        ? BoxShape.rectangle
-                                        : BoxShape.circle,
-                                    borderRadius: notificationText.length > 2
-                                        ? BorderRadius.circular(999)
-                                        : null,
-                                    border: Border.all(
-                                      color: Colors.white,
-                                      width: 2,
-                                    ),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color:
-                                            healthGreen.withValues(alpha: 0.35),
-                                        blurRadius: 8,
-                                        offset: const Offset(0, 3),
-                                      ),
-                                    ],
-                                  ),
-                                  alignment: Alignment.center,
-                                  child: Text(
-                                    notificationText,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w900,
-                                    ),
-                                  ),
-                                ),
-                              ),
                           ],
                         ),
                       ),
