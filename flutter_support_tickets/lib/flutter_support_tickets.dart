@@ -97,6 +97,96 @@ class SupportTicketsScope extends InheritedWidget {
   }
 }
 
+class SupportTicketsPreloader {
+  static final Map<String, _SupportTicketCacheEntry> _cache =
+      <String, _SupportTicketCacheEntry>{};
+  static const Duration _cacheTtl = Duration(minutes: 5);
+
+  static Future<void> preload({
+    required SupportTicketsConfig config,
+    required SupportTicketsUser user,
+  }) async {
+    final key = _cacheKey(config, user);
+    final existing = _cache[key];
+    if (existing != null) {
+      final age = DateTime.now().difference(existing.loadedAt);
+      if (existing.inFlight != null) {
+        await existing.inFlight;
+        return;
+      }
+      if (age < _cacheTtl) return;
+    }
+
+    late final Future<void> inFlight;
+    inFlight = _fetchAndCache(config: config, user: user, key: key);
+    _cache[key] = _SupportTicketCacheEntry(
+      tickets: existing?.tickets ?? <_Ticket>[],
+      loadedAt: existing?.loadedAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+      inFlight: inFlight,
+    );
+    await inFlight;
+  }
+
+  static List<_Ticket>? _cachedTickets({
+    required SupportTicketsConfig config,
+    required SupportTicketsUser user,
+  }) {
+    final existing = _cache[_cacheKey(config, user)];
+    if (existing == null || existing.tickets.isEmpty) return null;
+    if (DateTime.now().difference(existing.loadedAt) > _cacheTtl) return null;
+    return List<_Ticket>.of(existing.tickets);
+  }
+
+  static Future<void> _fetchAndCache({
+    required SupportTicketsConfig config,
+    required SupportTicketsUser user,
+    required String key,
+  }) async {
+    final client = _SupportApiClient(
+      config.apiBaseUrl,
+      appId: config.appId,
+      signingSecret: config.signingSecret,
+    );
+    final tickets = await client.fetchTickets(
+      userId: user.id,
+      userEmail: user.email,
+      userPhone: user.phone,
+    );
+    _cache[key] = _SupportTicketCacheEntry(
+      tickets: tickets,
+      loadedAt: DateTime.now(),
+    );
+  }
+
+  static void _storeTickets({
+    required SupportTicketsConfig config,
+    required SupportTicketsUser user,
+    required List<_Ticket> tickets,
+  }) {
+    _cache[_cacheKey(config, user)] = _SupportTicketCacheEntry(
+      tickets: List<_Ticket>.of(tickets),
+      loadedAt: DateTime.now(),
+    );
+  }
+
+  static String _cacheKey(
+      SupportTicketsConfig config, SupportTicketsUser user) {
+    return '${config.apiBaseUrl.trim()}|${config.appId?.trim() ?? ''}|${user.id.trim()}';
+  }
+}
+
+class _SupportTicketCacheEntry {
+  final List<_Ticket> tickets;
+  final DateTime loadedAt;
+  final Future<void>? inFlight;
+
+  const _SupportTicketCacheEntry({
+    required this.tickets,
+    required this.loadedAt,
+    this.inFlight,
+  });
+}
+
 class _Ticket {
   final String id;
   final String ticketNumber;
@@ -439,6 +529,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
   bool _ticketUnreadRefreshInFlight = false;
   final Map<String, int> _ticketUnreadCounts = <String, int>{};
   final Map<String, DateTime> _ticketLastSeenAgentAt = <String, DateTime>{};
+  SupportTicketsConfig? _config;
 
   static const List<String> _filters = <String>[
     'All',
@@ -468,13 +559,27 @@ class _TicketListScreenState extends State<TicketListScreen> {
     super.didChangeDependencies();
     final scope = SupportTicketsScope.of(context);
     if (_api == null) {
+      final config = scope?.config;
+      _config = config;
       _api = _SupportApiClient(
-        scope?.config.apiBaseUrl ?? '',
-        appId: scope?.config.appId,
-        signingSecret: scope?.config.signingSecret,
+        config?.apiBaseUrl ?? '',
+        appId: config?.appId,
+        signingSecret: config?.signingSecret,
       );
-      _user = widget.userOverride ?? scope?.config.resolveUser?.call(context);
-      _loadTickets();
+      _user = widget.userOverride ?? config?.resolveUser?.call(context);
+      final cachedTickets = config == null || _user == null
+          ? null
+          : SupportTicketsPreloader._cachedTickets(
+              config: config,
+              user: _user!,
+            );
+      if (cachedTickets != null) {
+        _tickets = cachedTickets.where(_ticketMatchesFilter).toList();
+        _loading = false;
+        unawaited(_loadTickets(silent: true));
+      } else {
+        _loadTickets();
+      }
       _startTicketListPolling();
     }
   }
@@ -726,6 +831,14 @@ class _TicketListScreenState extends State<TicketListScreen> {
         _loading = false;
         _error = null;
       });
+      final config = _config;
+      if (config != null && status.isEmpty) {
+        SupportTicketsPreloader._storeTickets(
+          config: config,
+          user: u,
+          tickets: tickets,
+        );
+      }
       unawaited(_refreshTicketUnreadCounts(filteredTickets));
     } catch (e) {
       if (!mounted) return;
