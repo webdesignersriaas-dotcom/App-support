@@ -432,6 +432,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
   final TextEditingController _subjectCtrl = TextEditingController();
   final TextEditingController _descriptionCtrl = TextEditingController();
   final TextEditingController _messageCtrl = TextEditingController();
+  final ScrollController _messagesScrollController = ScrollController();
   Timer? _refreshTimer;
   Timer? _ticketListRefreshTimer;
   bool _ticketListRefreshInFlight = false;
@@ -485,6 +486,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
     _subjectCtrl.dispose();
     _descriptionCtrl.dispose();
     _messageCtrl.dispose();
+    _messagesScrollController.dispose();
     super.dispose();
   }
 
@@ -761,14 +763,16 @@ class _TicketListScreenState extends State<TicketListScreen> {
       _messages = <_TicketMessage>[];
       _ticketUnreadCounts[_ticketKey(t)] = 0;
     });
-    await _loadMessages(markRead: true);
+    await _loadMessages(markRead: true, scrollToBottom: true);
     _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _loadMessages(silent: true);
     });
   }
 
   Future<void> _loadMessages(
-      {bool markRead = false, bool silent = false}) async {
+      {bool markRead = false,
+      bool silent = false,
+      bool scrollToBottom = false}) async {
     final t = _selectedTicket;
     if (t == null) return;
     if (!silent) setState(() => _loading = true);
@@ -795,11 +799,23 @@ class _TicketListScreenState extends State<TicketListScreen> {
         _messages = out;
         _loading = false;
       });
+      if (scrollToBottom) {
+        _scrollMessagesToBottom();
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() => _loading = false);
       if (!silent) _showErrorSnack(e);
     }
+  }
+
+  void _scrollMessagesToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_messagesScrollController.hasClients) return;
+      _messagesScrollController.jumpTo(
+        _messagesScrollController.position.maxScrollExtent,
+      );
+    });
   }
 
   Future<void> _sendMessage() async {
@@ -822,6 +838,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
         _messages = <_TicketMessage>[..._messages, msg];
         _sending = false;
       });
+      _scrollMessagesToBottom();
       await _loadMessages(markRead: true, silent: true);
       await _loadTickets();
     } catch (e) {
@@ -1449,6 +1466,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
               : RefreshIndicator(
                   onRefresh: () => _loadMessages(),
                   child: ListView.builder(
+                    controller: _messagesScrollController,
                     padding: const EdgeInsets.symmetric(
                         horizontal: 20, vertical: 24),
                     itemCount: _messages.length,
@@ -1755,7 +1773,7 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
   @override
   void initState() {
     super.initState();
-    _loadMessages();
+    _loadMessages(scrollToBottom: true);
     _refreshTimer = Timer.periodic(_refreshEvery, (_) {
       _loadMessages(silent: true);
     });
@@ -1787,7 +1805,9 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
   }
 
   Future<void> _loadMessages(
-      {bool markRead = false, bool silent = false}) async {
+      {bool markRead = false,
+      bool silent = false,
+      bool scrollToBottom = false}) async {
     if (!silent) {
       setState(() => _loading = true);
     }
@@ -1802,11 +1822,30 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
         _messages = out;
         _loading = false;
       });
+      if (scrollToBottom) {
+        _scrollToBottom();
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() => _loading = false);
       if (!silent) showSupportApiErrorSnack(context, e);
     }
+  }
+
+  void _scrollToBottom({bool animated = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final target = _scrollController.position.maxScrollExtent;
+      if (animated) {
+        _scrollController.animateTo(
+          target,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      } else {
+        _scrollController.jumpTo(target);
+      }
+    });
   }
 
   Future<void> _send() async {
@@ -1825,14 +1864,7 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
         _messages = <_TicketMessage>[..._messages, m];
         _sending = false;
       });
-      Timer(const Duration(milliseconds: 100), () {
-        if (!_scrollController.hasClients) return;
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      });
+      _scrollToBottom(animated: true);
       await _loadMessages(markRead: true, silent: true);
     } catch (e) {
       if (!mounted) return;
