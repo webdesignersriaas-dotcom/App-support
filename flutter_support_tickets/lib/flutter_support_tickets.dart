@@ -748,9 +748,9 @@ class _TicketListScreenState extends State<TicketListScreen> {
       _loading = true;
       _messages = <_TicketMessage>[];
     });
-    await _loadMessages(markRead: true);
+    await _loadMessages();
     _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      _loadMessages(markRead: true, silent: true);
+      _loadMessages(silent: true);
     });
   }
 
@@ -1439,7 +1439,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
           child: _loading
               ? const Center(child: CircularProgressIndicator())
               : RefreshIndicator(
-                  onRefresh: () => _loadMessages(markRead: true),
+                  onRefresh: () => _loadMessages(),
                   child: ListView.builder(
                     padding: const EdgeInsets.symmetric(
                         horizontal: 20, vertical: 24),
@@ -1747,9 +1747,9 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
   @override
   void initState() {
     super.initState();
-    _loadMessages(markRead: true);
+    _loadMessages();
     _refreshTimer = Timer.periodic(_refreshEvery, (_) {
-      _loadMessages(markRead: true, silent: true);
+      _loadMessages(silent: true);
     });
   }
 
@@ -2010,7 +2010,7 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
                 : RefreshIndicator(
-                    onRefresh: () => _loadMessages(markRead: true),
+                    onRefresh: () => _loadMessages(),
                     child: ListView.builder(
                       controller: _scrollController,
                       padding: const EdgeInsets.symmetric(
