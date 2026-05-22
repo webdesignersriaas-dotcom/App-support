@@ -1043,9 +1043,8 @@ class _TicketListScreenState extends State<TicketListScreen> {
                     final statusTag = _statusTagStyle(statusUi);
                     final unreadCount = _ticketUnreadCounts[_ticketKey(t)] ?? 0;
                     final hasUnread = unreadCount > 0;
-                    final replyText = unreadCount == 1
-                        ? '1 agent replied'
-                        : '$unreadCount agent replied';
+                    final badgeText =
+                        unreadCount > 99 ? '99+' : unreadCount.toString();
                     final dateText = t.createdAt == null
                         ? ''
                         : '${_monthShort(t.createdAt!.month)} ${t.createdAt!.day.toString().padLeft(2, '0')}, ${t.createdAt!.year}';
@@ -1092,30 +1091,13 @@ class _TicketListScreenState extends State<TicketListScreen> {
                                         ),
                                       ),
                                     ),
-                                    Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.end,
-                                      children: [
-                                        Text(
-                                          dateText,
-                                          style: const TextStyle(
-                                            color: Color(0xFF94A3B8),
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                        if (hasUnread) ...[
-                                          const SizedBox(height: 3),
-                                          Text(
-                                            replyText,
-                                            style: TextStyle(
-                                              color: healthGreen,
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.w900,
-                                            ),
-                                          ),
-                                        ],
-                                      ],
+                                    Text(
+                                      dateText,
+                                      style: const TextStyle(
+                                        color: Color(0xFF94A3B8),
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500,
+                                      ),
                                     ),
                                   ],
                                 ),
@@ -1169,6 +1151,47 @@ class _TicketListScreenState extends State<TicketListScreen> {
                                 ),
                               ],
                             ),
+                            if (hasUnread)
+                              Positioned(
+                                top: -32,
+                                right: -32,
+                                child: Container(
+                                  constraints: const BoxConstraints(
+                                    minWidth: 24,
+                                    minHeight: 24,
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 7,
+                                    vertical: 4,
+                                  ),
+                                  alignment: Alignment.center,
+                                  decoration: BoxDecoration(
+                                    color: healthGreen,
+                                    borderRadius: BorderRadius.circular(999),
+                                    border: Border.all(
+                                      color: Colors.white,
+                                      width: 2,
+                                    ),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color:
+                                            healthGreen.withValues(alpha: 0.35),
+                                        offset: const Offset(0, 3),
+                                        blurRadius: 8,
+                                      ),
+                                    ],
+                                  ),
+                                  child: Text(
+                                    badgeText,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w900,
+                                      height: 1,
+                                    ),
+                                  ),
+                                ),
+                              ),
                           ],
                         ),
                       ),
