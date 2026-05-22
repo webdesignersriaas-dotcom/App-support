@@ -368,6 +368,7 @@ function mapTicketFromERP(doc) {
     closed_at: toIso(doc.closed_at, null),
     metadata: safeJsonParse(doc.metadata, null),
     unread_message_count: typeof doc.unread_message_count === 'number' ? doc.unread_message_count : 0,
+    agent_message_count: typeof doc.agent_message_count === 'number' ? doc.agent_message_count : 0,
   };
 }
 
@@ -656,7 +657,7 @@ function toERPPriority(value) {
   return 'Medium';
 }
 
-async function countUnreadAgentMessages(ticket) {
+async function getAgentMessageCounts(ticket) {
   const ticketIds = [
     ticket?.id,
     ticket?.ticket_number,
@@ -673,11 +674,18 @@ async function countUnreadAgentMessages(ticket) {
         limit: MAX_LIST_LIMIT,
         orderBy: 'creation desc',
       });
-      return rows.filter((row) => {
+      const agentRows = rows.filter((row) => {
         const senderType = (row.sender_type || '').toString().trim().toLowerCase();
+        return senderType === 'agent';
+      });
+      const unread = agentRows.filter((row) => {
         const isRead = row.is_read === 1 || row.is_read === true || row.is_read === '1';
-        return senderType === 'agent' && !isRead;
+        return !isRead;
       }).length;
+      return {
+        unread,
+        total: agentRows.length,
+      };
     } catch (error) {
       console.warn(
         `Unread message count fallback after ${ticketId}: ${sanitizeErpErrorMessage(error.message)}`,
@@ -685,7 +693,10 @@ async function countUnreadAgentMessages(ticket) {
     }
   }
 
-  return 0;
+  return {
+    unread: 0,
+    total: 0,
+  };
 }
 
 // ============================================
@@ -840,7 +851,9 @@ app.get('/api/v1/support/tickets', async (req, res) => {
 
     const ticketsWithUnread = await Promise.all(rows.map(async (row) => {
       const ticket = mapTicketFromERP(row);
-      ticket.unread_message_count = await countUnreadAgentMessages(ticket);
+      const agentMessageCounts = await getAgentMessageCounts(ticket);
+      ticket.unread_message_count = agentMessageCounts.unread;
+      ticket.agent_message_count = agentMessageCounts.total;
       return ticket;
     }));
 
