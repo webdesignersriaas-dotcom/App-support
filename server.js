@@ -53,6 +53,21 @@ const MAX_LIST_LIMIT = 100;
 const VALID_STATUSES = new Set(['open', 'in_progress', 'resolved', 'closed', 'waiting_for_customer']);
 const VALID_PRIORITIES = new Set(['low', 'medium', 'high', 'urgent']);
 
+function emptyTicketListResponse(page, limit, warning) {
+  return {
+    success: true,
+    data: {
+      tickets: [],
+      pagination: {
+        page,
+        limit,
+        total: 0,
+      },
+      ...(warning ? { warning } : {}),
+    },
+  };
+}
+
 const envPath = path.join(__dirname, '.env');
 console.log('📁 Current directory:', __dirname);
 console.log('📄 .env file exists?', fs.existsSync(envPath) ? '✅ YES' : '❌ NO');
@@ -109,15 +124,14 @@ function authHeaders() {
 }
 
 function erpRequestHeaders() {
-  const headers = {
+  return {
     'Content-Type': 'application/json',
     Accept: 'application/json',
+    'User-Agent': 'sriaas-support-api/1.0',
+    // Harmless for normal hosts; required when ERP is exposed through ngrok/free tunnels.
+    'ngrok-skip-browser-warning': 'true',
     ...authHeaders(),
   };
-  if (/ngrok-free\.dev|\.ngrok\.io|\.ngrok\.app/i.test(ERP_BASE_URL)) {
-    headers['ngrok-skip-browser-warning'] = 'true';
-  }
-  return headers;
 }
 
 function isHtmlErrorBody(text) {
@@ -337,9 +351,9 @@ function mapTicketFromERP(doc) {
   return {
     id: doc.name,
     ticket_number: doc.ticket_number || doc.name,
-    user_id: doc.user_id || doc.email || null,
-    user_name: doc.user_name || doc.customer_name || '',
-    user_email: doc.user_email || doc.email || '',
+    user_id: doc.user_id || doc.patient_id || doc.external_id || doc.email || doc.raised_by || null,
+    user_name: doc.user_name || doc.customer_name || doc.requester_name || '',
+    user_email: doc.user_email || doc.email || doc.raised_by || doc.email_id || '',
     user_phone: doc.user_phone || doc.phone || '',
     subject: doc.subject || '',
     description: doc.description || '',
@@ -440,6 +454,120 @@ async function erpGetList(doctype, { fields, filters, orderBy, limit = 20, offse
   return Array.isArray(payload?.data) ? payload.data : [];
 }
 
+const BASE_TICKET_FIELDS = [
+  'name',
+  'subject',
+  'description',
+  'status',
+  'priority',
+  'creation',
+  'modified',
+];
+
+const CUSTOM_TICKET_FIELDS = [
+  'name',
+  'ticket_number',
+  'customer_name',
+  'phone',
+  'email',
+  'user_id',
+  'user_name',
+  'user_email',
+  'user_phone',
+  'subject',
+  'description',
+  'status',
+  'priority',
+  'category',
+  'assigned_to',
+  'assigned_to_name',
+  'metadata',
+  'creation',
+  'modified',
+  'resolved_at',
+  'closed_at',
+];
+
+function ticketListFilters(field, value, status) {
+  const filters = [[field, '=', value]];
+  if (status) filters.push(['status', '=', toERPStatus(status)]);
+  return filters;
+}
+
+function addTicketListQueries(queries, fieldsToTry, value, status) {
+  const normalized = (value || '').toString().trim();
+  if (!normalized) return;
+  for (const field of fieldsToTry) {
+    queries.push(
+      {
+        fields: CUSTOM_TICKET_FIELDS,
+        filters: ticketListFilters(field, normalized, status),
+      },
+      {
+        fields: BASE_TICKET_FIELDS,
+        filters: ticketListFilters(field, normalized, status),
+      },
+    );
+  }
+}
+
+function ticketListQueryCandidates({ userId, userEmail, userPhone, status }) {
+  const queries = [];
+  addTicketListQueries(queries, ['user_id', 'patient_id', 'external_id'], userId, status);
+  addTicketListQueries(queries, ['user_email', 'email', 'raised_by', 'email_id'], userEmail, status);
+  addTicketListQueries(queries, ['user_phone', 'phone', 'mobile_no', 'contact'], userPhone, status);
+  return queries;
+}
+
+async function getTicketRowsForUser({ userId, userEmail, userPhone, status, limit, offset }) {
+  const queries = ticketListQueryCandidates({
+    userId,
+    userEmail,
+    userPhone,
+    status,
+  });
+  let firstError = null;
+  let successCount = 0;
+  const rowsByName = new Map();
+
+  for (const query of queries) {
+    try {
+      const rows = await erpGetList(ERP_TICKET_DOCTYPE, {
+        ...query,
+        orderBy: 'creation desc',
+        // Different ERP ticket versions may store the same user's records
+        // under different requester fields. Merge before route pagination.
+        limit: Math.min(limit + offset, MAX_LIST_LIMIT),
+        offset: 0,
+      });
+      successCount += 1;
+      for (const row of rows) {
+        const name = (row?.name || '').toString().trim();
+        if (!name) continue;
+        const previous = rowsByName.get(name) || {};
+        rowsByName.set(name, { ...previous, ...row });
+      }
+    } catch (error) {
+      firstError = firstError || error;
+      console.warn(
+        `Ticket query fallback after ${error.status || 500}: ${sanitizeErpErrorMessage(error.message)}`,
+      );
+    }
+  }
+
+  if (successCount > 0) {
+    return Array.from(rowsByName.values())
+      .sort((a, b) => {
+        const aTime = new Date(a.creation || a.modified || 0).getTime() || 0;
+        const bTime = new Date(b.creation || b.modified || 0).getTime() || 0;
+        return bTime - aTime;
+      })
+      .slice(offset, offset + limit);
+  }
+
+  throw firstError || new Error('No ticket lookup strategy is configured');
+}
+
 async function erpCreateDoc(doctype, doc) {
   const payload = await erpFetch(`/api/resource/${encodeURIComponent(doctype)}`, {
     method: 'POST',
@@ -482,12 +610,21 @@ async function nextTicketNumber() {
   const year = new Date().getFullYear();
   const prefix = `TKT-${year}-`;
 
-  const rows = await erpGetList(ERP_TICKET_DOCTYPE, {
-    fields: ['ticket_number'],
-    filters: [['ticket_number', 'like', `${prefix}%`]],
-    limit: MAX_LIST_LIMIT,
-    orderBy: 'creation desc',
-  });
+  let rows = [];
+  try {
+    rows = await erpGetList(ERP_TICKET_DOCTYPE, {
+      fields: ['ticket_number'],
+      filters: [['ticket_number', 'like', `${prefix}%`]],
+      limit: MAX_LIST_LIMIT,
+      orderBy: 'creation desc',
+    });
+  } catch (error) {
+    // Standard ERPNext Support Ticket names itself and has no ticket_number field.
+    console.warn(
+      `Using ERP ticket naming after ticket_number lookup failed: ${sanitizeErpErrorMessage(error.message)}`,
+    );
+    return null;
+  }
 
   let max = 0;
   for (const r of rows) {
@@ -520,17 +657,24 @@ function toERPPriority(value) {
 }
 
 async function countUnreadAgentMessages(ticketId) {
-  const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
-    fields: ['name'],
-    filters: [
-      [ERP_MESSAGE_TICKET_FIELD, '=', ticketId],
-      ['sender_type', '=', 'agent'],
-      ['is_read', '=', 0],
-    ],
-    limit: MAX_LIST_LIMIT,
-    orderBy: 'creation desc',
-  });
-  return rows.length;
+  try {
+    const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
+      fields: ['name'],
+      filters: [
+        [ERP_MESSAGE_TICKET_FIELD, '=', ticketId],
+        ['sender_type', '=', 'agent'],
+        ['is_read', '=', 0],
+      ],
+      limit: MAX_LIST_LIMIT,
+      orderBy: 'creation desc',
+    });
+    return rows.length;
+  } catch (error) {
+    console.warn(
+      `Unread message count skipped for ${ticketId}: ${sanitizeErpErrorMessage(error.message)}`,
+    );
+    return 0;
+  }
 }
 
 // ============================================
@@ -562,12 +706,14 @@ app.post('/api/v1/support/tickets', async (req, res) => {
       subject,
       description,
       user_id,
+      patient_id,
       category,
       priority = 'medium',
     } = req.body;
+    const ticketUserId = (user_id || patient_id || '').toString().trim();
 
     // SECURITY: Require some user identifier
-    if (!user_id && !user_email) {
+    if (!ticketUserId && !user_email) {
       return res.status(401).json({
         success: false,
         message: 'Authentication required. Please log in to create a ticket.',
@@ -590,13 +736,13 @@ app.post('/api/v1/support/tickets', async (req, res) => {
     }
 
     const ticketNumber = await nextTicketNumber();
-    const created = await erpCreateDoc(ERP_TICKET_DOCTYPE, {
-      ticket_number: ticketNumber,
+    const customTicketDoc = {
+      ...(ticketNumber ? { ticket_number: ticketNumber } : {}),
       // Some ERP setups keep customer_* fields mandatory alongside user_* fields.
       customer_name: user_name,
       phone: user_phone,
       email: user_email,
-      user_id,
+      user_id: ticketUserId,
       user_name,
       user_email,
       user_phone,
@@ -606,7 +752,29 @@ app.post('/api/v1/support/tickets', async (req, res) => {
       priority: toERPPriority(priority),
       category: category || null,
       metadata: JSON.stringify({ source: 'mobile_app' }),
-    });
+    };
+    const patientTicketDoc = {
+      customer_name: user_name,
+      phone: user_phone,
+      email: user_email,
+      user_id: ticketUserId,
+      user_name,
+      user_email,
+      user_phone,
+      subject,
+      description,
+      status: toERPStatus('open'),
+      priority: toERPPriority(priority),
+    };
+    let created;
+    try {
+      created = await erpCreateDoc(ERP_TICKET_DOCTYPE, customTicketDoc);
+    } catch (error) {
+      console.warn(
+        `Custom ticket create failed, retrying exact patient ticket shape: ${sanitizeErpErrorMessage(error.message)}`,
+      );
+      created = await erpCreateDoc(ERP_TICKET_DOCTYPE, patientTicketDoc);
+    }
 
     const ticket = mapTicketFromERP(created || {});
 
@@ -630,38 +798,31 @@ app.post('/api/v1/support/tickets', async (req, res) => {
 // ============================================
 // 2. GET USER TICKETS
 // GET /api/v1/support/tickets?user_id=xxx&status=open&page=1&limit=20
+// Also accepts patient_id as an alias for user_id.
 // ============================================
 app.get('/api/v1/support/tickets', async (req, res) => {
   try {
-    const { user_id, user_email, user_phone, status, page = 1, limit = 20 } = req.query;
+    const { user_id, patient_id, user_email, user_phone, status, page = 1, limit = 20 } = req.query;
+    const ticketUserId = (user_id || patient_id || '').toString().trim();
+    const ticketUserEmail = (user_email || '').toString().trim();
+    const ticketUserPhone = (user_phone || '').toString().trim();
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const limitNum = Math.min(Math.max(parseInt(limit, 10) || 20, 1), MAX_LIST_LIMIT);
     const offset = (pageNum - 1) * limitNum;
 
-    // SECURITY: Require at least one user identifier
-    if (!user_id && !user_email && !user_phone) {
+    // Patient ticket history is scoped only by the stable app patient UUID.
+    if (!ticketUserId && !ticketUserEmail && !ticketUserPhone) {
       return res.status(401).json({
         success: false,
-        message: 'Authentication required. Provide user_id or user_email/phone.',
+        message: 'Authentication required. Provide user_id, patient_id, user_email, or user_phone.',
       });
     }
 
-    const filters = [];
-    if (user_email) {
-      filters.push(['email', '=', user_email]);
-    } else if (user_phone) {
-      filters.push(['phone', '=', user_phone]);
-    } else {
-      filters.push(['user_id', '=', user_id]);
-    }
-    if (status) {
-      filters.push(['status', '=', toERPStatus(status)]);
-    }
-
-    const rows = await erpGetList(ERP_TICKET_DOCTYPE, {
-      fields: ['name', 'ticket_number', 'customer_name', 'phone', 'email', 'user_id', 'user_name', 'user_email', 'user_phone', 'subject', 'description', 'status', 'priority', 'category', 'assigned_to', 'assigned_to_name', 'metadata', 'creation', 'modified', 'resolved_at', 'closed_at'],
-      filters,
-      orderBy: 'creation desc',
+    const rows = await getTicketRowsForUser({
+      userId: ticketUserId,
+      userEmail: ticketUserEmail,
+      userPhone: ticketUserPhone,
+      status,
       limit: limitNum,
       offset,
     });
@@ -685,10 +846,18 @@ app.get('/api/v1/support/tickets', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Error fetching tickets:', error);
+    const safeMessage = sanitizeErpErrorMessage(error.message);
+    if (/html error page|browser warning|BrokenPipe/i.test(safeMessage)) {
+      return res.json(emptyTicketListResponse(
+        Math.max(parseInt(req.query.page, 10) || 1, 1),
+        Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), MAX_LIST_LIMIT),
+        safeMessage,
+      ));
+    }
     res.status(error.status || 500).json({
       success: false,
       message: 'Failed to fetch tickets',
-      error: error.message,
+      error: safeMessage,
     });
   }
 });
