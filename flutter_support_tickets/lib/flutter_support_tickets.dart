@@ -539,12 +539,18 @@ class _TicketListScreenState extends State<TicketListScreen> {
             latestUserReplyAt = message.createdAt;
           }
         }
+        final lastSeenAgentAt = _ticketLastSeenAgentAt[key];
+        DateTime? unreadAfter = latestUserReplyAt;
+        if (lastSeenAgentAt != null &&
+            (unreadAfter == null || lastSeenAgentAt.isAfter(unreadAfter))) {
+          unreadAfter = lastSeenAgentAt;
+        }
         var unseenAgentCount = 0;
         for (final message in messages) {
           if (message.senderType != 'agent') continue;
           final createdAt = message.createdAt;
-          if (latestUserReplyAt == null ||
-              (createdAt != null && createdAt.isAfter(latestUserReplyAt))) {
+          if (unreadAfter == null ||
+              (createdAt != null && createdAt.isAfter(unreadAfter))) {
             unseenAgentCount += 1;
           }
         }
@@ -753,8 +759,9 @@ class _TicketListScreenState extends State<TicketListScreen> {
       _currentView = _SupportView.details;
       _loading = true;
       _messages = <_TicketMessage>[];
+      _ticketUnreadCounts[_ticketKey(t)] = 0;
     });
-    await _loadMessages();
+    await _loadMessages(markRead: true);
     _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _loadMessages(silent: true);
     });
