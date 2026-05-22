@@ -435,6 +435,9 @@ class _TicketListScreenState extends State<TicketListScreen> {
   Timer? _refreshTimer;
   Timer? _ticketListRefreshTimer;
   bool _ticketListRefreshInFlight = false;
+  bool _ticketUnreadRefreshInFlight = false;
+  final Map<String, int> _ticketUnreadCounts = <String, int>{};
+  final Map<String, DateTime> _ticketLastSeenAgentAt = <String, DateTime>{};
 
   static const List<String> _filters = <String>[
     'All',
@@ -491,6 +494,63 @@ class _TicketListScreenState extends State<TicketListScreen> {
       if (!mounted || _currentView != _SupportView.dashboard) return;
       _loadTickets(silent: true);
     });
+  }
+
+  String _ticketKey(_Ticket t) =>
+      t.ticketNumber.trim().isNotEmpty ? t.ticketNumber.trim() : t.id.trim();
+
+  void _markTicketSeen(_Ticket ticket, List<_TicketMessage> messages) {
+    final key = _ticketKey(ticket);
+    DateTime? latestAgentAt = _ticketLastSeenAgentAt[key];
+    for (final message in messages) {
+      if (message.senderType != 'agent' || message.createdAt == null) continue;
+      if (latestAgentAt == null || message.createdAt!.isAfter(latestAgentAt)) {
+        latestAgentAt = message.createdAt;
+      }
+    }
+    if (latestAgentAt != null) {
+      _ticketLastSeenAgentAt[key] = latestAgentAt;
+    }
+    _ticketUnreadCounts[key] = 0;
+  }
+
+  Future<void> _refreshTicketUnreadCounts(List<_Ticket> tickets) async {
+    if (_ticketUnreadRefreshInFlight ||
+        _currentView != _SupportView.dashboard) {
+      return;
+    }
+    final client = _api;
+    if (client == null || tickets.isEmpty) return;
+
+    _ticketUnreadRefreshInFlight = true;
+    final nextCounts = <String, int>{};
+    try {
+      for (final ticket in tickets) {
+        final key = _ticketKey(ticket);
+        final messages =
+            await client.fetchMessages(ticketIdOrNumber: ticket.ticketNumber);
+        final lastSeen = _ticketLastSeenAgentAt[key];
+        var unseenAgentCount = 0;
+        for (final message in messages) {
+          if (message.senderType != 'agent') continue;
+          final createdAt = message.createdAt;
+          if (lastSeen == null ||
+              createdAt == null ||
+              createdAt.isAfter(lastSeen)) {
+            unseenAgentCount += 1;
+          }
+        }
+        nextCounts[key] = unseenAgentCount > ticket.unreadMessageCount
+            ? unseenAgentCount
+            : ticket.unreadMessageCount;
+      }
+      if (!mounted || nextCounts.isEmpty) return;
+      setState(() => _ticketUnreadCounts.addAll(nextCounts));
+    } catch (e) {
+      debugPrint('Support ticket unread refresh unavailable: $e');
+    } finally {
+      _ticketUnreadRefreshInFlight = false;
+    }
   }
 
   String _statusToApi(String ui) {
@@ -629,6 +689,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
         _loading = false;
         _error = null;
       });
+      unawaited(_refreshTicketUnreadCounts(tickets));
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -703,6 +764,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
       if (client == null) return;
       final out = await client.fetchMessages(ticketIdOrNumber: t.ticketNumber);
       if (markRead) {
+        _markTicketSeen(t, out);
         final ids = out
             .where((m) => m.senderType == 'agent')
             .map((m) => m.id)
@@ -973,7 +1035,8 @@ class _TicketListScreenState extends State<TicketListScreen> {
                   ..._tickets.map((t) {
                     final statusUi = _statusToUi(t.status);
                     final statusTag = _statusTagStyle(statusUi);
-                    final unreadCount = t.unreadMessageCount;
+                    final unreadCount = _ticketUnreadCounts[_ticketKey(t)] ??
+                        t.unreadMessageCount;
                     final hasUnread = unreadCount > 0;
                     final notificationText =
                         unreadCount > 99 ? '99+' : '$unreadCount';
