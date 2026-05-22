@@ -1379,7 +1379,8 @@ class _TicketListScreenState extends State<TicketListScreen> {
     if (t == null) return const SizedBox.shrink();
     final statusUi = _statusToUi(t.status);
     final priorityUi = _priorityToUi(t.priority);
-    final repliesDisabled = _isClosedTicketStatus(t.status);
+    final repliesDisabled =
+        _isClosedTicketStatus(t.status) || _isClosedTicketStatus(statusUi);
     final categoryText = (t.category == null || t.category!.trim().isEmpty)
         ? 'General'
         : t.category!;
@@ -1897,7 +1898,8 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
   Widget build(BuildContext context) {
     final statusUi = _statusToUi(widget.ticket.status);
     final priorityUi = _priorityToUi(widget.ticket.priority);
-    final repliesDisabled = _isClosedTicketStatus(widget.ticket.status);
+    final repliesDisabled = _isClosedTicketStatus(widget.ticket.status) ||
+        _isClosedTicketStatus(statusUi);
     final dateText = widget.ticket.createdAt == null
         ? '-'
         : '${_monthShort(widget.ticket.createdAt!.month)} ${widget.ticket.createdAt!.day.toString().padLeft(2, '0')}, ${widget.ticket.createdAt!.year}';
