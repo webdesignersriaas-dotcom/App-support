@@ -529,6 +529,12 @@ class _TicketListScreenState extends State<TicketListScreen> {
     try {
       for (final ticket in tickets) {
         final key = _ticketKey(ticket);
+        final statusUi = _statusToUi(ticket.status);
+        if (_isClosedTicketStatus(ticket.status) ||
+            _isClosedTicketStatus(statusUi)) {
+          nextCounts[key] = 0;
+          continue;
+        }
         final messages =
             await client.fetchMessages(ticketIdOrNumber: ticket.ticketNumber);
         DateTime? latestUserReplyAt;
@@ -669,6 +675,8 @@ class _TicketListScreenState extends State<TicketListScreen> {
 
   ({Color bg, Color text}) _statusTagStyle(String statusUi) {
     switch (statusUi) {
+      case 'Resolved':
+        return (bg: const Color(0xFFDCFCE7), text: const Color(0xFF166534));
       case 'Closed':
         return (bg: const Color(0xFFE53935), text: Colors.white);
       case 'In Progress':
@@ -1071,7 +1079,12 @@ class _TicketListScreenState extends State<TicketListScreen> {
                   ..._tickets.map((t) {
                     final statusUi = _statusToUi(t.status);
                     final statusTag = _statusTagStyle(statusUi);
-                    final unreadCount = _ticketUnreadCounts[_ticketKey(t)] ?? 0;
+                    final notificationsDisabled =
+                        _isClosedTicketStatus(t.status) ||
+                            _isClosedTicketStatus(statusUi);
+                    final unreadCount = notificationsDisabled
+                        ? 0
+                        : _ticketUnreadCounts[_ticketKey(t)] ?? 0;
                     final hasUnread = unreadCount > 0;
                     final badgeText =
                         unreadCount > 99 ? '99+' : unreadCount.toString();
