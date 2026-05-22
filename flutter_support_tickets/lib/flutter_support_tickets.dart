@@ -37,6 +37,11 @@ void showSupportApiErrorSnack(BuildContext context, Object e) {
   );
 }
 
+int _countFromJson(dynamic value) {
+  if (value is num) return value.toInt();
+  return int.tryParse((value ?? '').toString().trim()) ?? 0;
+}
+
 class SupportTicketsConfig {
   final String apiBaseUrl;
   final String defaultAvatarUrlOrAsset;
@@ -101,6 +106,7 @@ class _Ticket {
   final String priority;
   final String? category;
   final int unreadMessageCount;
+  final int agentMessageCount;
   final DateTime? createdAt;
 
   _Ticket({
@@ -112,6 +118,7 @@ class _Ticket {
     required this.priority,
     required this.category,
     required this.unreadMessageCount,
+    required this.agentMessageCount,
     required this.createdAt,
   });
 
@@ -124,9 +131,8 @@ class _Ticket {
       status: (j['status'] ?? 'open').toString(),
       priority: (j['priority'] ?? 'medium').toString(),
       category: j['category']?.toString(),
-      unreadMessageCount: (j['unread_message_count'] is num)
-          ? (j['unread_message_count'] as num).toInt()
-          : 0,
+      unreadMessageCount: _countFromJson(j['unread_message_count']),
+      agentMessageCount: _countFromJson(j['agent_message_count']),
       createdAt: DateTime.tryParse((j['created_at'] ?? '').toString()),
     );
   }
@@ -273,10 +279,9 @@ class _SupportApiClient {
       'page': '1',
       'limit': '50',
       if (userId.trim().isNotEmpty) 'user_id': userId,
-      if (userEmail != null && userEmail.trim().isNotEmpty)
-        'user_email': userEmail.trim(),
-      if (userPhone != null && userPhone.trim().isNotEmpty)
-        'user_phone': userPhone.trim(),
+      if (userId.trim().isNotEmpty) 'patient_id': userId,
+      if ((userEmail ?? '').trim().isNotEmpty) 'user_email': userEmail!.trim(),
+      if ((userPhone ?? '').trim().isNotEmpty) 'user_phone': userPhone!.trim(),
       if (status != null && status.isNotEmpty) 'status': status,
     };
     const path = '/api/v1/support/tickets';
@@ -428,6 +433,8 @@ class _TicketListScreenState extends State<TicketListScreen> {
   final TextEditingController _descriptionCtrl = TextEditingController();
   final TextEditingController _messageCtrl = TextEditingController();
   Timer? _refreshTimer;
+  Timer? _ticketListRefreshTimer;
+  bool _ticketListRefreshInFlight = false;
 
   static const List<String> _filters = <String>[
     'All',
@@ -464,16 +471,26 @@ class _TicketListScreenState extends State<TicketListScreen> {
       );
       _user = widget.userOverride ?? scope?.config.resolveUser?.call(context);
       _loadTickets();
+      _startTicketListPolling();
     }
   }
 
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _ticketListRefreshTimer?.cancel();
     _subjectCtrl.dispose();
     _descriptionCtrl.dispose();
     _messageCtrl.dispose();
     super.dispose();
+  }
+
+  void _startTicketListPolling() {
+    _ticketListRefreshTimer?.cancel();
+    _ticketListRefreshTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+      if (!mounted || _currentView != _SupportView.dashboard) return;
+      _loadTickets(silent: true);
+    });
   }
 
   String _statusToApi(String ui) {
@@ -584,12 +601,11 @@ class _TicketListScreenState extends State<TicketListScreen> {
     }
   }
 
-  Future<void> _loadTickets() async {
+  Future<void> _loadTickets({bool silent = false}) async {
+    if (_ticketListRefreshInFlight) return;
     final u = _user;
     final hasId = (u?.id ?? '').trim().isNotEmpty;
-    final hasEmail = (u?.email ?? '').trim().isNotEmpty;
-    final hasPhone = (u?.phone ?? '').trim().isNotEmpty;
-    if (u == null || (!hasId && !hasEmail && !hasPhone)) {
+    if (u == null || !hasId) {
       setState(() {
         _loading = false;
         _error = 'Please login first to use support tickets.';
@@ -597,6 +613,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
       return;
     }
     try {
+      _ticketListRefreshInFlight = true;
       final status = _statusToApi(_selectedFilter);
       final client = _api;
       if (client == null) return;
@@ -615,9 +632,13 @@ class _TicketListScreenState extends State<TicketListScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
+        _tickets = <_Ticket>[];
         _loading = false;
-        _error = e.toString().replaceFirst('Exception: ', '');
+        _error = null;
       });
+      if (!silent) debugPrint('Support ticket list unavailable: $e');
+    } finally {
+      _ticketListRefreshInFlight = false;
     }
   }
 
@@ -648,6 +669,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
         _tickets = <_Ticket>[t, ..._tickets];
         _currentView = _SupportView.dashboard;
       });
+      _startTicketListPolling();
     } catch (e) {
       if (!mounted) return;
       _showErrorSnack(e);
@@ -658,6 +680,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
 
   Future<void> _openDetails(_Ticket t) async {
     _refreshTimer?.cancel();
+    _ticketListRefreshTimer?.cancel();
     setState(() {
       _selectedTicket = t;
       _currentView = _SupportView.details;
@@ -770,6 +793,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
                       _selectedTicket = null;
                     });
                     await _loadTickets();
+                    _startTicketListPolling();
                   },
                 ),
                 const Expanded(
@@ -849,6 +873,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
                     _selectedTicket = null;
                   });
                   await _loadTickets();
+                  _startTicketListPolling();
                 },
               ),
               Expanded(
@@ -948,6 +973,10 @@ class _TicketListScreenState extends State<TicketListScreen> {
                   ..._tickets.map((t) {
                     final statusUi = _statusToUi(t.status);
                     final statusTag = _statusTagStyle(statusUi);
+                    final unreadCount = t.unreadMessageCount;
+                    final hasUnread = unreadCount > 0;
+                    final notificationText =
+                        unreadCount > 99 ? '99+' : '$unreadCount';
                     final dateText = t.createdAt == null
                         ? ''
                         : '${_monthShort(t.createdAt!.month)} ${t.createdAt!.day.toString().padLeft(2, '0')}, ${t.createdAt!.year}';
@@ -968,85 +997,137 @@ class _TicketListScreenState extends State<TicketListScreen> {
                           ],
                           border: Border.all(color: const Color(0xFFF1F5F9)),
                         ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: <Widget>[
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: <Widget>[
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: statusTag.bg,
-                                    borderRadius: BorderRadius.circular(8),
+                                Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: <Widget>[
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 10, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        color: statusTag.bg,
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Text(
+                                        statusUi.toUpperCase(),
+                                        style: TextStyle(
+                                          color: statusTag.text,
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                                      ),
+                                    ),
+                                    Text(
+                                      dateText,
+                                      style: const TextStyle(
+                                        color: Color(0xFF94A3B8),
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 10),
+                                Text(t.subject,
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 31 / 2,
+                                        color: Color(0xFF1E293B))),
+                                const SizedBox(height: 4),
+                                Text(t.category ?? 'General',
+                                    style: const TextStyle(
+                                        color: Color(0xFF94A3B8),
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500)),
+                                const Divider(
+                                    height: 24, color: Color(0xFFE2E8F0)),
+                                Row(
+                                  children: <Widget>[
+                                    Icon(
+                                      Icons.flag_rounded,
+                                      size: 14,
+                                      color: _priorityTextColor(
+                                          _priorityToUi(t.priority)),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      '${_priorityToUi(t.priority)} Priority',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: _priorityTextColor(
+                                            _priorityToUi(t.priority)),
+                                      ),
+                                    ),
+                                    const Spacer(),
+                                    Text(
+                                      'View Discussion',
+                                      style: TextStyle(
+                                        color: healthGreen,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                    Icon(
+                                      Icons.chevron_right_rounded,
+                                      size: 16,
+                                      color: healthGreen,
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                            if (hasUnread)
+                              Positioned(
+                                top: -10,
+                                right: -10,
+                                child: Container(
+                                  constraints: const BoxConstraints(
+                                    minWidth: 24,
+                                    minHeight: 24,
                                   ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 7,
+                                    vertical: 4,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: healthGreen,
+                                    shape: notificationText.length > 2
+                                        ? BoxShape.rectangle
+                                        : BoxShape.circle,
+                                    borderRadius: notificationText.length > 2
+                                        ? BorderRadius.circular(999)
+                                        : null,
+                                    border: Border.all(
+                                      color: Colors.white,
+                                      width: 2,
+                                    ),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color:
+                                            healthGreen.withValues(alpha: 0.35),
+                                        blurRadius: 8,
+                                        offset: const Offset(0, 3),
+                                      ),
+                                    ],
+                                  ),
+                                  alignment: Alignment.center,
                                   child: Text(
-                                    statusUi.toUpperCase(),
-                                    style: TextStyle(
-                                      color: statusTag.text,
-                                      fontSize: 10,
+                                    notificationText,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 11,
                                       fontWeight: FontWeight.w900,
                                     ),
                                   ),
                                 ),
-                                Text(
-                                  dateText,
-                                  style: const TextStyle(
-                                    color: Color(0xFF94A3B8),
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 10),
-                            Text(t.subject,
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w900,
-                                    fontSize: 31 / 2,
-                                    color: Color(0xFF1E293B))),
-                            const SizedBox(height: 4),
-                            Text(t.category ?? 'General',
-                                style: const TextStyle(
-                                    color: Color(0xFF94A3B8),
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500)),
-                            const Divider(height: 24, color: Color(0xFFE2E8F0)),
-                            Row(
-                              children: <Widget>[
-                                Icon(
-                                  Icons.flag_rounded,
-                                  size: 14,
-                                  color: _priorityTextColor(
-                                      _priorityToUi(t.priority)),
-                                ),
-                                const SizedBox(width: 4),
-                                Text(
-                                  '${_priorityToUi(t.priority)} Priority',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.bold,
-                                    color: _priorityTextColor(
-                                        _priorityToUi(t.priority)),
-                                  ),
-                                ),
-                                const Spacer(),
-                                Text(
-                                  'View Discussion',
-                                  style: TextStyle(
-                                    color: healthGreen,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                                Icon(
-                                  Icons.chevron_right_rounded,
-                                  size: 16,
-                                  color: healthGreen,
-                                ),
-                              ],
-                            ),
+                              ),
                           ],
                         ),
                       ),
