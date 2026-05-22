@@ -589,10 +589,11 @@ class _TicketListScreenState extends State<TicketListScreen> {
   }
 
   String _statusToUi(String api) {
-    switch (api) {
+    switch (api.toLowerCase().trim()) {
       case 'open':
         return 'Open';
       case 'in_progress':
+      case 'in progress':
         return 'In Progress';
       case 'resolved':
         return 'Resolved';
@@ -601,6 +602,11 @@ class _TicketListScreenState extends State<TicketListScreen> {
       default:
         return api;
     }
+  }
+
+  bool _ticketMatchesFilter(_Ticket ticket) {
+    if (_selectedFilter == 'All') return true;
+    return _statusToUi(ticket.status) == _selectedFilter;
   }
 
   bool _isClosedTicketStatus(String status) {
@@ -713,13 +719,14 @@ class _TicketListScreenState extends State<TicketListScreen> {
         userPhone: u.phone,
         status: status.isEmpty ? null : status,
       );
+      final filteredTickets = tickets.where(_ticketMatchesFilter).toList();
       if (!mounted) return;
       setState(() {
-        _tickets = tickets;
+        _tickets = filteredTickets;
         _loading = false;
         _error = null;
       });
-      unawaited(_refreshTicketUnreadCounts(tickets));
+      unawaited(_refreshTicketUnreadCounts(filteredTickets));
     } catch (e) {
       if (!mounted) return;
       setState(() {
