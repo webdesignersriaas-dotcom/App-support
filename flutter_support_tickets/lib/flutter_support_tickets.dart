@@ -701,6 +701,9 @@ class _TicketListScreenState extends State<TicketListScreen> {
     }
     try {
       _ticketListRefreshInFlight = true;
+      if (!silent && _tickets.isEmpty) {
+        setState(() => _loading = true);
+      }
       final status = _statusToApi(_selectedFilter);
       final client = _api;
       if (client == null) return;
@@ -720,7 +723,9 @@ class _TicketListScreenState extends State<TicketListScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _tickets = <_Ticket>[];
+        if (!silent) {
+          _tickets = <_Ticket>[];
+        }
         _loading = false;
         _error = null;
       });
@@ -1066,7 +1071,14 @@ class _TicketListScreenState extends State<TicketListScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
               children: <Widget>[
                 const SizedBox(height: 6),
-                if (_tickets.isEmpty)
+                if (_loading && _tickets.isEmpty)
+                  const Center(
+                    child: Padding(
+                      padding: EdgeInsets.only(top: 80),
+                      child: CircularProgressIndicator(),
+                    ),
+                  )
+                else if (_tickets.isEmpty)
                   Center(
                       child: Padding(
                     padding: const EdgeInsets.only(top: 80),
