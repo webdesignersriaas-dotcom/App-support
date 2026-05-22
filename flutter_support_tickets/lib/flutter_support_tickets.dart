@@ -597,6 +597,11 @@ class _TicketListScreenState extends State<TicketListScreen> {
     }
   }
 
+  bool _isClosedTicketStatus(String status) {
+    final normalized = status.toLowerCase().trim();
+    return normalized == 'closed' || normalized == 'resolved';
+  }
+
   String _priorityToApi(String ui) {
     switch (ui) {
       case 'Low priority':
@@ -821,6 +826,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
   Future<void> _sendMessage() async {
     final t = _selectedTicket;
     if (t == null || _user == null) return;
+    if (_isClosedTicketStatus(t.status)) return;
     final text = _messageCtrl.text.trim();
     if (text.isEmpty || _sending) return;
     setState(() => _sending = true);
@@ -1373,6 +1379,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
     if (t == null) return const SizedBox.shrink();
     final statusUi = _statusToUi(t.status);
     final priorityUi = _priorityToUi(t.priority);
+    final repliesDisabled = _isClosedTicketStatus(t.status);
     final categoryText = (t.category == null || t.category!.trim().isEmpty)
         ? 'General'
         : t.category!;
@@ -1577,7 +1584,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
                 ),
                 child: IconButton(
                   icon: const Icon(Icons.add_rounded, color: Color(0xFF64748B)),
-                  onPressed: () {},
+                  onPressed: repliesDisabled ? null : () {},
                 ),
               ),
               const SizedBox(width: 12),
@@ -1589,28 +1596,35 @@ class _TicketListScreenState extends State<TicketListScreen> {
                       borderRadius: BorderRadius.circular(16)),
                   child: TextField(
                     controller: _messageCtrl,
+                    enabled: !repliesDisabled,
                     style: const TextStyle(
                         fontSize: 14, fontWeight: FontWeight.w500),
-                    decoration: const InputDecoration(
-                      hintText: 'Type your message...',
-                      hintStyle: TextStyle(color: Color(0xFF94A3B8)),
+                    decoration: InputDecoration(
+                      hintText: repliesDisabled
+                          ? 'Ticket is closed'
+                          : 'Type your message...',
+                      hintStyle: const TextStyle(color: Color(0xFF94A3B8)),
                       border: InputBorder.none,
                     ),
-                    onSubmitted: (_) => _sendMessage(),
+                    onSubmitted: repliesDisabled ? null : (_) => _sendMessage(),
                   ),
                 ),
               ),
               const SizedBox(width: 12),
               GestureDetector(
-                onTap: _sending ? null : _sendMessage,
+                onTap: repliesDisabled || _sending ? null : _sendMessage,
                 child: Container(
                   padding: const EdgeInsets.all(14),
                   decoration: BoxDecoration(
-                    color: healthGreen,
+                    color:
+                        repliesDisabled ? const Color(0xFFCBD5E1) : healthGreen,
                     borderRadius: BorderRadius.circular(16),
                     boxShadow: [
                       BoxShadow(
-                        color: healthGreen.withValues(alpha: 0.3),
+                        color: (repliesDisabled
+                                ? const Color(0xFF94A3B8)
+                                : healthGreen)
+                            .withValues(alpha: 0.3),
                         blurRadius: 10,
                         offset: const Offset(0, 4),
                       ),
@@ -1702,6 +1716,11 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
     if (s == 'closed') return 'Resolved';
     if (s == 'pending') return 'Waiting';
     return api.isEmpty ? 'Unknown' : api;
+  }
+
+  bool _isClosedTicketStatus(String status) {
+    final normalized = status.toLowerCase().trim();
+    return normalized == 'closed' || normalized == 'resolved';
   }
 
   ({Color bg, Color text}) _statusTagStyle(String statusUi) {
@@ -1849,6 +1868,7 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
   }
 
   Future<void> _send() async {
+    if (_isClosedTicketStatus(widget.ticket.status)) return;
     final text = _messageCtrl.text.trim();
     if (text.isEmpty || _sending) return;
     setState(() => _sending = true);
@@ -1877,6 +1897,7 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
   Widget build(BuildContext context) {
     final statusUi = _statusToUi(widget.ticket.status);
     final priorityUi = _priorityToUi(widget.ticket.priority);
+    final repliesDisabled = _isClosedTicketStatus(widget.ticket.status);
     final dateText = widget.ticket.createdAt == null
         ? '-'
         : '${_monthShort(widget.ticket.createdAt!.month)} ${widget.ticket.createdAt!.day.toString().padLeft(2, '0')}, ${widget.ticket.createdAt!.year}';
@@ -2167,7 +2188,7 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
                     child: IconButton(
                       icon: const Icon(Icons.add_rounded,
                           color: Color(0xFF64748B)),
-                      onPressed: () {},
+                      onPressed: repliesDisabled ? null : () {},
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -2180,28 +2201,36 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
                       ),
                       child: TextField(
                         controller: _messageCtrl,
+                        enabled: !repliesDisabled,
                         style: const TextStyle(
                             fontSize: 14, fontWeight: FontWeight.w500),
-                        decoration: const InputDecoration(
-                          hintText: 'Type your message...',
-                          hintStyle: TextStyle(color: Color(0xFF94A3B8)),
+                        decoration: InputDecoration(
+                          hintText: repliesDisabled
+                              ? 'Ticket is closed'
+                              : 'Type your message...',
+                          hintStyle: const TextStyle(color: Color(0xFF94A3B8)),
                           border: InputBorder.none,
                         ),
-                        onSubmitted: (_) => _send(),
+                        onSubmitted: repliesDisabled ? null : (_) => _send(),
                       ),
                     ),
                   ),
                   const SizedBox(width: 12),
                   GestureDetector(
-                    onTap: _sending ? null : _send,
+                    onTap: repliesDisabled || _sending ? null : _send,
                     child: Container(
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
-                        color: healthGreen,
+                        color: repliesDisabled
+                            ? const Color(0xFFCBD5E1)
+                            : healthGreen,
                         borderRadius: BorderRadius.circular(16),
                         boxShadow: [
                           BoxShadow(
-                            color: healthGreen.withValues(alpha: 0.3),
+                            color: (repliesDisabled
+                                    ? const Color(0xFF94A3B8)
+                                    : healthGreen)
+                                .withValues(alpha: 0.3),
                             blurRadius: 10,
                             offset: const Offset(0, 4),
                           ),
