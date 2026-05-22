@@ -656,25 +656,36 @@ function toERPPriority(value) {
   return 'Medium';
 }
 
-async function countUnreadAgentMessages(ticketId) {
-  try {
-    const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
-      fields: ['name'],
-      filters: [
-        [ERP_MESSAGE_TICKET_FIELD, '=', ticketId],
-        ['sender_type', '=', 'agent'],
-        ['is_read', '=', 0],
-      ],
-      limit: MAX_LIST_LIMIT,
-      orderBy: 'creation desc',
-    });
-    return rows.length;
-  } catch (error) {
-    console.warn(
-      `Unread message count skipped for ${ticketId}: ${sanitizeErpErrorMessage(error.message)}`,
-    );
-    return 0;
+async function countUnreadAgentMessages(ticket) {
+  const ticketIds = [
+    ticket?.id,
+    ticket?.ticket_number,
+  ]
+    .map((v) => (v || '').toString().trim())
+    .filter(Boolean);
+  const uniqueTicketIds = Array.from(new Set(ticketIds));
+
+  for (const ticketId of uniqueTicketIds) {
+    try {
+      const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
+        fields: ['name', 'sender_type', 'is_read'],
+        filters: [[ERP_MESSAGE_TICKET_FIELD, '=', ticketId]],
+        limit: MAX_LIST_LIMIT,
+        orderBy: 'creation desc',
+      });
+      return rows.filter((row) => {
+        const senderType = (row.sender_type || '').toString().trim().toLowerCase();
+        const isRead = row.is_read === 1 || row.is_read === true || row.is_read === '1';
+        return senderType === 'agent' && !isRead;
+      }).length;
+    } catch (error) {
+      console.warn(
+        `Unread message count fallback after ${ticketId}: ${sanitizeErpErrorMessage(error.message)}`,
+      );
+    }
   }
+
+  return 0;
 }
 
 // ============================================
@@ -829,7 +840,7 @@ app.get('/api/v1/support/tickets', async (req, res) => {
 
     const ticketsWithUnread = await Promise.all(rows.map(async (row) => {
       const ticket = mapTicketFromERP(row);
-      ticket.unread_message_count = await countUnreadAgentMessages(ticket.id);
+      ticket.unread_message_count = await countUnreadAgentMessages(ticket);
       return ticket;
     }));
 
@@ -1134,11 +1145,13 @@ app.post('/api/v1/support/tickets/:id/messages/read', async (req, res) => {
       targets = rows.map((r) => r.name);
     } else {
       const rows = await erpGetList(ERP_MESSAGE_DOCTYPE, {
-        fields: ['name'],
-        filters: [[ERP_MESSAGE_TICKET_FIELD, '=', ticketDoc.name], ['sender_type', '=', 'agent']],
+        fields: ['name', 'sender_type'],
+        filters: [[ERP_MESSAGE_TICKET_FIELD, '=', ticketDoc.name]],
         limit: MAX_LIST_LIMIT,
       });
-      targets = rows.map((r) => r.name);
+      targets = rows
+        .filter((r) => (r.sender_type || '').toString().trim().toLowerCase() === 'agent')
+        .map((r) => r.name);
     }
 
     await Promise.all(targets.map((name) =>
