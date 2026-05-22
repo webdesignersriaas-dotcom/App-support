@@ -529,20 +529,26 @@ class _TicketListScreenState extends State<TicketListScreen> {
         final key = _ticketKey(ticket);
         final messages =
             await client.fetchMessages(ticketIdOrNumber: ticket.ticketNumber);
-        final lastSeen = _ticketLastSeenAgentAt[key];
+        DateTime? latestUserReplyAt;
+        for (final message in messages) {
+          if (message.senderType == 'agent' || message.createdAt == null) {
+            continue;
+          }
+          if (latestUserReplyAt == null ||
+              message.createdAt!.isAfter(latestUserReplyAt)) {
+            latestUserReplyAt = message.createdAt;
+          }
+        }
         var unseenAgentCount = 0;
         for (final message in messages) {
           if (message.senderType != 'agent') continue;
           final createdAt = message.createdAt;
-          if (lastSeen == null ||
-              createdAt == null ||
-              createdAt.isAfter(lastSeen)) {
+          if (latestUserReplyAt == null ||
+              (createdAt != null && createdAt.isAfter(latestUserReplyAt))) {
             unseenAgentCount += 1;
           }
         }
-        nextCounts[key] = unseenAgentCount > ticket.unreadMessageCount
-            ? unseenAgentCount
-            : ticket.unreadMessageCount;
+        nextCounts[key] = unseenAgentCount;
       }
       if (!mounted || nextCounts.isEmpty) return;
       setState(() => _ticketUnreadCounts.addAll(nextCounts));
@@ -1035,8 +1041,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
                   ..._tickets.map((t) {
                     final statusUi = _statusToUi(t.status);
                     final statusTag = _statusTagStyle(statusUi);
-                    final unreadCount = _ticketUnreadCounts[_ticketKey(t)] ??
-                        t.unreadMessageCount;
+                    final unreadCount = _ticketUnreadCounts[_ticketKey(t)] ?? 0;
                     final hasUnread = unreadCount > 0;
                     final replyText = unreadCount == 1
                         ? '1 agent replied'
