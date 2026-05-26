@@ -1732,17 +1732,6 @@ class _TicketListScreenState extends State<TicketListScreen> {
           ),
           child: Row(
             children: <Widget>[
-              Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF1F5F9),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: IconButton(
-                  icon: const Icon(Icons.add_rounded, color: Color(0xFF64748B)),
-                  onPressed: repliesDisabled ? null : () {},
-                ),
-              ),
-              const SizedBox(width: 12),
               Expanded(
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -2336,18 +2325,6 @@ class _TicketChatScreenState extends State<_TicketChatScreen> {
               ),
               child: Row(
                 children: [
-                  Container(
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF1F5F9),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: IconButton(
-                      icon: const Icon(Icons.add_rounded,
-                          color: Color(0xFF64748B)),
-                      onPressed: repliesDisabled ? null : () {},
-                    ),
-                  ),
-                  const SizedBox(width: 12),
                   Expanded(
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
