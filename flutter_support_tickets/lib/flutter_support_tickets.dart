@@ -194,6 +194,7 @@ class _Ticket {
   final String description;
   final String status;
   final String priority;
+  final String userId;
   final String? category;
   final int unreadMessageCount;
   final int agentMessageCount;
@@ -206,6 +207,7 @@ class _Ticket {
     required this.description,
     required this.status,
     required this.priority,
+    required this.userId,
     required this.category,
     required this.unreadMessageCount,
     required this.agentMessageCount,
@@ -220,6 +222,8 @@ class _Ticket {
       description: (j['description'] ?? '').toString(),
       status: (j['status'] ?? 'open').toString(),
       priority: (j['priority'] ?? 'medium').toString(),
+      userId: (j['user_id'] ?? j['patient_id'] ?? j['external_id'] ?? '')
+          .toString(),
       category: j['category']?.toString(),
       unreadMessageCount: _countFromJson(j['unread_message_count']),
       agentMessageCount: _countFromJson(j['agent_message_count']),
@@ -708,6 +712,13 @@ class _TicketListScreenState extends State<TicketListScreen> {
   }
 
   bool _ticketMatchesFilter(_Ticket ticket) {
+    final currentUserId = (_user?.id ?? '').trim();
+    final ticketUserId = ticket.userId.trim();
+    if (currentUserId.isNotEmpty &&
+        ticketUserId.isNotEmpty &&
+        ticketUserId != currentUserId) {
+      return false;
+    }
     if (_selectedFilter == 'All') return true;
     return _statusToUi(ticket.status) == _selectedFilter;
   }
