@@ -370,8 +370,6 @@ class _SupportApiClient {
       'limit': '50',
       if (userId.trim().isNotEmpty) 'user_id': userId,
       if (userId.trim().isNotEmpty) 'patient_id': userId,
-      if ((userEmail ?? '').trim().isNotEmpty) 'user_email': userEmail!.trim(),
-      if ((userPhone ?? '').trim().isNotEmpty) 'user_phone': userPhone!.trim(),
       if (status != null && status.isNotEmpty) 'status': status,
     };
     const path = '/api/v1/support/tickets';

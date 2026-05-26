@@ -515,8 +515,6 @@ function addTicketListQueries(queries, fieldsToTry, value, status) {
 function ticketListQueryCandidates({ userId, userEmail, userPhone, status }) {
   const queries = [];
   addTicketListQueries(queries, ['user_id', 'patient_id', 'external_id'], userId, status);
-  addTicketListQueries(queries, ['user_email', 'email', 'raised_by', 'email_id'], userEmail, status);
-  addTicketListQueries(queries, ['user_phone', 'phone', 'mobile_no', 'contact'], userPhone, status);
   return queries;
 }
 
@@ -824,26 +822,24 @@ app.post('/api/v1/support/tickets', async (req, res) => {
 // ============================================
 app.get('/api/v1/support/tickets', async (req, res) => {
   try {
-    const { user_id, patient_id, user_email, user_phone, status, page = 1, limit = 20 } = req.query;
+    const { user_id, patient_id, status, page = 1, limit = 20 } = req.query;
     const ticketUserId = (user_id || patient_id || '').toString().trim();
-    const ticketUserEmail = (user_email || '').toString().trim();
-    const ticketUserPhone = (user_phone || '').toString().trim();
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const limitNum = Math.min(Math.max(parseInt(limit, 10) || 20, 1), MAX_LIST_LIMIT);
     const offset = (pageNum - 1) * limitNum;
 
     // Patient ticket history is scoped only by the stable app patient UUID.
-    if (!ticketUserId && !ticketUserEmail && !ticketUserPhone) {
+    if (!ticketUserId) {
       return res.status(401).json({
         success: false,
-        message: 'Authentication required. Provide user_id, patient_id, user_email, or user_phone.',
+        message: 'Authentication required. Provide user_id or patient_id.',
       });
     }
 
     const rows = await getTicketRowsForUser({
       userId: ticketUserId,
-      userEmail: ticketUserEmail,
-      userPhone: ticketUserPhone,
+      userEmail: '',
+      userPhone: '',
       status,
       limit: limitNum,
       offset,
