@@ -48,6 +48,7 @@ class SupportTicketsConfig {
   final SupportTicketsResolveUser? resolveUser;
   final String? appId;
   final String? signingSecret;
+  final String? erpToken;
 
   const SupportTicketsConfig({
     required this.apiBaseUrl,
@@ -55,6 +56,7 @@ class SupportTicketsConfig {
     this.resolveUser,
     this.appId,
     this.signingSecret,
+    this.erpToken,
   });
 }
 
@@ -146,6 +148,7 @@ class SupportTicketsPreloader {
       config.apiBaseUrl,
       appId: config.appId,
       signingSecret: config.signingSecret,
+      erpToken: config.erpToken,
     );
     final tickets = await client.fetchTickets(
       userId: user.id,
@@ -171,7 +174,7 @@ class SupportTicketsPreloader {
 
   static String _cacheKey(
       SupportTicketsConfig config, SupportTicketsUser user) {
-    return '${config.apiBaseUrl.trim()}|${config.appId?.trim() ?? ''}|${user.id.trim()}';
+    return '${config.apiBaseUrl.trim()}|${config.appId?.trim() ?? ''}|${config.erpToken?.trim() ?? ''}|${user.id.trim()}';
   }
 }
 
@@ -265,13 +268,16 @@ class _SupportApiClient {
   final String baseUrl;
   final String appId;
   final String signingSecret;
+  final String erpToken;
 
   _SupportApiClient(
     this.baseUrl, {
     String? appId,
     String? signingSecret,
+    String? erpToken,
   })  : appId = (appId ?? '').trim(),
-        signingSecret = (signingSecret ?? '').trim();
+        signingSecret = (signingSecret ?? '').trim(),
+        erpToken = (erpToken ?? '').trim();
 
   Uri _uri(String path, [Map<String, String>? query]) {
     final root = baseUrl.endsWith('/')
@@ -288,6 +294,7 @@ class _SupportApiClient {
   }) {
     final headers = <String, String>{};
     if (includeContentType) headers['Content-Type'] = 'application/json';
+    if (erpToken.isNotEmpty) headers['X-ERP-Token'] = erpToken;
     if (appId.isEmpty || signingSecret.isEmpty) return headers;
 
     final timestamp = DateTime.now().millisecondsSinceEpoch.toString();
@@ -572,6 +579,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
         config?.apiBaseUrl ?? '',
         appId: config?.appId,
         signingSecret: config?.signingSecret,
+        erpToken: config?.erpToken,
       );
       _user = widget.userOverride ?? config?.resolveUser?.call(context);
       final cachedTickets = config == null || _user == null
