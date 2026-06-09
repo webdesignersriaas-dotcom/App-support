@@ -30,6 +30,7 @@ ERP_BEARER_TOKEN=
 
 # Optional DocType overrides
 ERP_TICKET_DOCTYPE=Support Ticket
+ERP_FALLBACK_TICKET_DOCTYPE=Mobile App Support Ticket
 ERP_MESSAGE_DOCTYPE=Support Ticket Message
 
 # Request signing (recommended for production)
@@ -137,7 +138,7 @@ curl -X POST "http://localhost:3000/api/v1/support/tickets" \
 
 - **Method/URL:** `GET /api/v1/support/tickets`
 - **Query params:**
-  - `user_id` (required)
+  - `user_id` or `patient_id` (required; use the patient's stable UUID)
   - `status` (optional: `open | in_progress | resolved | closed`)
   - `page` (optional, default `1`)
   - `limit` (optional, default `20`, max `100`)
@@ -145,7 +146,8 @@ curl -X POST "http://localhost:3000/api/v1/support/tickets" \
 Example:
 
 ```bash
-curl -X GET "http://localhost:3000/api/v1/support/tickets?user_id=USER_123&status=open&page=1&limit=20"
+curl -X GET "http://localhost:3000/api/v1/support/tickets?user_id=b41b0af8-97c9-4ffb-96d5-7d2a6c639616&status=open&page=1&limit=20"
+curl -X GET "http://localhost:3000/api/v1/support/tickets?patient_id=b41b0af8-97c9-4ffb-96d5-7d2a6c639616&page=1&limit=20"
 ```
 
 ---
@@ -278,5 +280,6 @@ curl -X POST "http://localhost:3000/api/v1/support/tickets/TKT-2026-000001/messa
 
 - API internally stores tickets/messages in ERPNext DocTypes configured by:
   - `ERP_TICKET_DOCTYPE`
+  - `ERP_FALLBACK_TICKET_DOCTYPE`
   - `ERP_MESSAGE_DOCTYPE`
 - If ERP auth is missing (`ERP_API_KEY` + `ERP_API_SECRET`, or `ERP_BEARER_TOKEN`), calls will fail.

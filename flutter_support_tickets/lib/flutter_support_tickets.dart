@@ -374,6 +374,8 @@ class _SupportApiClient {
       'limit': '50',
       if (userId.trim().isNotEmpty) 'user_id': userId,
       if (userId.trim().isNotEmpty) 'patient_id': userId,
+      if ((userEmail ?? '').trim().isNotEmpty) 'user_email': userEmail!.trim(),
+      if ((userPhone ?? '').trim().isNotEmpty) 'user_phone': userPhone!.trim(),
       if (status != null && status.isNotEmpty) 'status': status,
     };
     const path = '/api/v1/support/tickets';
@@ -514,6 +516,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
   bool _loading = true;
   bool _sending = false;
   String? _error;
+  List<_Ticket> _allTickets = <_Ticket>[];
   List<_Ticket> _tickets = <_Ticket>[];
   List<_TicketMessage> _messages = <_TicketMessage>[];
   _SupportView _currentView = _SupportView.dashboard;
@@ -530,6 +533,8 @@ class _TicketListScreenState extends State<TicketListScreen> {
   bool _ticketListRefreshInFlight = false;
   bool _ticketUnreadRefreshInFlight = false;
   final Map<String, int> _ticketUnreadCounts = <String, int>{};
+  final Map<String, List<_TicketMessage>> _ticketMessageCache =
+      <String, List<_TicketMessage>>{};
   final Map<String, DateTime> _ticketLastSeenAgentAt = <String, DateTime>{};
   SupportTicketsConfig? _config;
 
@@ -576,8 +581,10 @@ class _TicketListScreenState extends State<TicketListScreen> {
               user: _user!,
             );
       if (cachedTickets != null) {
-        _tickets = cachedTickets.where(_ticketMatchesFilter).toList();
+        _allTickets = cachedTickets;
+        _tickets = _filteredTicketsForCurrentStatus();
         _loading = false;
+        unawaited(_refreshTicketUnreadCounts(_tickets));
         unawaited(_loadTickets(silent: true));
       } else {
         _loadTickets();
@@ -634,16 +641,16 @@ class _TicketListScreenState extends State<TicketListScreen> {
     _ticketUnreadRefreshInFlight = true;
     final nextCounts = <String, int>{};
     try {
-      for (final ticket in tickets) {
+      final counts = await Future.wait(tickets.map((ticket) async {
         final key = _ticketKey(ticket);
         final statusUi = _statusToUi(ticket.status);
         if (_isClosedTicketStatus(ticket.status) ||
             _isClosedTicketStatus(statusUi)) {
-          nextCounts[key] = 0;
-          continue;
+          return MapEntry<String, int>(key, 0);
         }
         final messages =
             await client.fetchMessages(ticketIdOrNumber: ticket.ticketNumber);
+        _ticketMessageCache[key] = messages;
         DateTime? latestUserReplyAt;
         for (final message in messages) {
           if (message.senderType == 'agent' || message.createdAt == null) {
@@ -669,29 +676,15 @@ class _TicketListScreenState extends State<TicketListScreen> {
             unseenAgentCount += 1;
           }
         }
-        nextCounts[key] = unseenAgentCount;
-      }
+        return MapEntry<String, int>(key, unseenAgentCount);
+      }));
+      nextCounts.addEntries(counts);
       if (!mounted || nextCounts.isEmpty) return;
       setState(() => _ticketUnreadCounts.addAll(nextCounts));
     } catch (e) {
       debugPrint('Support ticket unread refresh unavailable: $e');
     } finally {
       _ticketUnreadRefreshInFlight = false;
-    }
-  }
-
-  String _statusToApi(String ui) {
-    switch (ui) {
-      case 'Open':
-        return 'open';
-      case 'In Progress':
-        return 'in_progress';
-      case 'Resolved':
-        return 'resolved';
-      case 'Closed':
-        return 'closed';
-      default:
-        return '';
     }
   }
 
@@ -721,6 +714,10 @@ class _TicketListScreenState extends State<TicketListScreen> {
     }
     if (_selectedFilter == 'All') return true;
     return _statusToUi(ticket.status) == _selectedFilter;
+  }
+
+  List<_Ticket> _filteredTicketsForCurrentStatus() {
+    return _allTickets.where(_ticketMatchesFilter).toList();
   }
 
   bool _isClosedTicketStatus(String status) {
@@ -824,24 +821,23 @@ class _TicketListScreenState extends State<TicketListScreen> {
       if (!silent && _tickets.isEmpty) {
         setState(() => _loading = true);
       }
-      final status = _statusToApi(_selectedFilter);
       final client = _api;
       if (client == null) return;
       final tickets = await client.fetchTickets(
         userId: u.id,
         userEmail: u.email,
         userPhone: u.phone,
-        status: status.isEmpty ? null : status,
       );
-      final filteredTickets = tickets.where(_ticketMatchesFilter).toList();
       if (!mounted) return;
+      _allTickets = tickets;
+      final filteredTickets = _filteredTicketsForCurrentStatus();
       setState(() {
         _tickets = filteredTickets;
         _loading = false;
         _error = null;
       });
       final config = _config;
-      if (config != null && status.isEmpty) {
+      if (config != null) {
         SupportTicketsPreloader._storeTickets(
           config: config,
           user: u,
@@ -853,6 +849,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
       if (!mounted) return;
       setState(() {
         if (!silent) {
+          _allTickets = <_Ticket>[];
           _tickets = <_Ticket>[];
         }
         _loading = false;
@@ -888,7 +885,8 @@ class _TicketListScreenState extends State<TicketListScreen> {
       _subjectCtrl.clear();
       _descriptionCtrl.clear();
       setState(() {
-        _tickets = <_Ticket>[t, ..._tickets];
+        _allTickets = <_Ticket>[t, ..._allTickets];
+        _tickets = _filteredTicketsForCurrentStatus();
         _currentView = _SupportView.dashboard;
       });
       _startTicketListPolling();
@@ -903,14 +901,23 @@ class _TicketListScreenState extends State<TicketListScreen> {
   Future<void> _openDetails(_Ticket t) async {
     _refreshTimer?.cancel();
     _ticketListRefreshTimer?.cancel();
+    final cachedMessages = _ticketMessageCache[_ticketKey(t)];
     setState(() {
       _selectedTicket = t;
       _currentView = _SupportView.details;
-      _loading = true;
-      _messages = <_TicketMessage>[];
+      _loading = cachedMessages == null;
+      _messages = cachedMessages ?? <_TicketMessage>[];
       _ticketUnreadCounts[_ticketKey(t)] = 0;
     });
-    await _loadMessages(markRead: true, scrollToBottom: true);
+    if (cachedMessages != null) {
+      _markTicketSeen(t, cachedMessages);
+      _scrollMessagesToBottom();
+      unawaited(
+        _loadMessages(markRead: true, silent: true, scrollToBottom: true),
+      );
+    } else {
+      await _loadMessages(markRead: true, scrollToBottom: true);
+    }
     _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _loadMessages(silent: true);
     });
@@ -927,6 +934,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
       final client = _api;
       if (client == null) return;
       final out = await client.fetchMessages(ticketIdOrNumber: t.ticketNumber);
+      _ticketMessageCache[_ticketKey(t)] = out;
       if (markRead) {
         _markTicketSeen(t, out);
         final ids = out
@@ -984,6 +992,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
       _messageCtrl.clear();
       setState(() {
         _messages = <_TicketMessage>[..._messages, msg];
+        _ticketMessageCache[_ticketKey(t)] = _messages;
         _sending = false;
       });
       _scrollMessagesToBottom();
@@ -1159,9 +1168,13 @@ class _TicketListScreenState extends State<TicketListScreen> {
           final filter = _filters[index];
           final selected = _selectedFilter == filter;
           return GestureDetector(
-            onTap: () async {
-              setState(() => _selectedFilter = filter);
-              await _loadTickets();
+            onTap: () {
+              if (_selectedFilter == filter) return;
+              setState(() {
+                _selectedFilter = filter;
+                _tickets = _filteredTicketsForCurrentStatus();
+              });
+              unawaited(_refreshTicketUnreadCounts(_tickets));
             },
             child: Container(
               margin: const EdgeInsets.only(right: 8),
