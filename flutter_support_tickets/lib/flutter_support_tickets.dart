@@ -674,12 +674,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
             latestUserReplyAt = message.createdAt;
           }
         }
-        final lastSeenAgentAt = _ticketLastSeenAgentAt[key];
         DateTime? unreadAfter = latestUserReplyAt;
-        if (lastSeenAgentAt != null &&
-            (unreadAfter == null || lastSeenAgentAt.isAfter(unreadAfter))) {
-          unreadAfter = lastSeenAgentAt;
-        }
         var unseenAgentCount = 0;
         for (final message in messages) {
           if (message.senderType != 'agent') continue;
@@ -929,16 +924,14 @@ class _TicketListScreenState extends State<TicketListScreen> {
       _currentView = _SupportView.details;
       _loading = cachedMessages == null;
       _messages = cachedMessages ?? <_TicketMessage>[];
-      _ticketUnreadCounts[_ticketKey(t)] = 0;
     });
     if (cachedMessages != null) {
-      _markTicketSeen(t, cachedMessages);
       _scrollMessagesToBottom();
       unawaited(
-        _loadMessages(markRead: true, silent: true, scrollToBottom: true),
+        _loadMessages(silent: true, scrollToBottom: true),
       );
     } else {
-      await _loadMessages(markRead: true, scrollToBottom: true);
+      await _loadMessages(scrollToBottom: true);
     }
     _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _loadMessages(silent: true);
@@ -1015,6 +1008,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
       setState(() {
         _messages = <_TicketMessage>[..._messages, msg];
         _ticketMessageCache[_ticketKey(t)] = _messages;
+        _ticketUnreadCounts[_ticketKey(t)] = 0;
         _sending = false;
       });
       _scrollMessagesToBottom();
