@@ -42,6 +42,13 @@ int _countFromJson(dynamic value) {
   return int.tryParse((value ?? '').toString().trim()) ?? 0;
 }
 
+bool _boolFromJson(dynamic value) {
+  if (value is bool) return value;
+  if (value is num) return value != 0;
+  final normalized = (value ?? '').toString().trim().toLowerCase();
+  return normalized == 'true' || normalized == '1' || normalized == 'yes';
+}
+
 class SupportTicketsConfig {
   final String apiBaseUrl;
   final String defaultAvatarUrlOrAsset;
@@ -201,6 +208,7 @@ class _Ticket {
   final String? category;
   final int unreadMessageCount;
   final int agentMessageCount;
+  final bool hasPendingAgentReply;
   final DateTime? createdAt;
 
   _Ticket({
@@ -214,6 +222,7 @@ class _Ticket {
     required this.category,
     required this.unreadMessageCount,
     required this.agentMessageCount,
+    required this.hasPendingAgentReply,
     required this.createdAt,
   });
 
@@ -230,6 +239,7 @@ class _Ticket {
       category: j['category']?.toString(),
       unreadMessageCount: _countFromJson(j['unread_message_count']),
       agentMessageCount: _countFromJson(j['agent_message_count']),
+      hasPendingAgentReply: _boolFromJson(j['has_pending_agent_reply']),
       createdAt: DateTime.tryParse((j['created_at'] ?? '').toString()),
     );
   }
@@ -1255,9 +1265,11 @@ class _TicketListScreenState extends State<TicketListScreen> {
                     final unreadCount = notificationsDisabled
                         ? 0
                         : _ticketUnreadCounts[_ticketKey(t)] ?? 0;
-                    final hasUnread = unreadCount > 0;
-                    final badgeText =
-                        unreadCount > 99 ? '99+' : unreadCount.toString();
+                    final hasUnread = !notificationsDisabled &&
+                        (unreadCount > 0 || t.hasPendingAgentReply);
+                    final badgeText = unreadCount > 0
+                        ? (unreadCount > 99 ? '99+' : unreadCount.toString())
+                        : '!';
                     final dateText = t.createdAt == null
                         ? ''
                         : '${_monthShort(t.createdAt!.month)} ${t.createdAt!.day.toString().padLeft(2, '0')}, ${t.createdAt!.year}';
@@ -1348,9 +1360,13 @@ class _TicketListScreenState extends State<TicketListScreen> {
                                     ),
                                     const Spacer(),
                                     Text(
-                                      'View Discussion',
+                                      hasUnread
+                                          ? 'Pending Reply'
+                                          : 'View Discussion',
                                       style: TextStyle(
-                                        color: healthGreen,
+                                        color: hasUnread
+                                            ? const Color(0xFFDC2626)
+                                            : healthGreen,
                                         fontWeight: FontWeight.bold,
                                         fontSize: 12,
                                       ),
@@ -1358,7 +1374,9 @@ class _TicketListScreenState extends State<TicketListScreen> {
                                     Icon(
                                       Icons.chevron_right_rounded,
                                       size: 16,
-                                      color: healthGreen,
+                                      color: hasUnread
+                                          ? const Color(0xFFDC2626)
+                                          : healthGreen,
                                     ),
                                   ],
                                 ),
@@ -1379,7 +1397,7 @@ class _TicketListScreenState extends State<TicketListScreen> {
                                   ),
                                   alignment: Alignment.center,
                                   decoration: BoxDecoration(
-                                    color: healthGreen,
+                                    color: const Color(0xFFDC2626),
                                     borderRadius: BorderRadius.circular(999),
                                     border: Border.all(
                                       color: Colors.white,
@@ -1387,8 +1405,8 @@ class _TicketListScreenState extends State<TicketListScreen> {
                                     ),
                                     boxShadow: [
                                       BoxShadow(
-                                        color:
-                                            healthGreen.withValues(alpha: 0.35),
+                                        color: const Color(0xFFDC2626)
+                                            .withValues(alpha: 0.35),
                                         offset: const Offset(0, 3),
                                         blurRadius: 8,
                                       ),
