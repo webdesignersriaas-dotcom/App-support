@@ -689,7 +689,11 @@ class _TicketListScreenState extends State<TicketListScreen> {
             unseenAgentCount += 1;
           }
         }
-        return MapEntry<String, int>(key, unseenAgentCount);
+        final backendCount = ticket.unreadMessageCount;
+        return MapEntry<String, int>(
+          key,
+          unseenAgentCount > backendCount ? unseenAgentCount : backendCount,
+        );
       }));
       nextCounts.addEntries(counts);
       if (!mounted || nextCounts.isEmpty) return;
@@ -1368,8 +1372,8 @@ class _TicketListScreenState extends State<TicketListScreen> {
                             ),
                             if (hasUnread)
                               Positioned(
-                                top: -32,
-                                right: -32,
+                                top: 8,
+                                right: 8,
                                 child: Container(
                                   constraints: const BoxConstraints(
                                     minWidth: 24,
