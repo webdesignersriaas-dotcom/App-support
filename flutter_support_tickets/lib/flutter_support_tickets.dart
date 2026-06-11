@@ -296,6 +296,10 @@ class _SupportApiClient {
     return Uri.parse('$root$path').replace(queryParameters: query);
   }
 
+  String _ticketPathSegment(String ticketIdOrNumber) {
+    return Uri.encodeComponent(ticketIdOrNumber.trim());
+  }
+
   Map<String, String> _signedHeaders({
     required String method,
     required String path,
@@ -450,7 +454,8 @@ class _SupportApiClient {
 
   Future<List<_TicketMessage>> fetchMessages(
       {required String ticketIdOrNumber}) async {
-    final path = '/api/v1/support/tickets/$ticketIdOrNumber/messages';
+    final path =
+        '/api/v1/support/tickets/${_ticketPathSegment(ticketIdOrNumber)}/messages';
     final r = await http.get(
       _uri(path, <String, String>{
         'page': '1',
@@ -471,7 +476,8 @@ class _SupportApiClient {
     required SupportTicketsUser user,
     required String message,
   }) async {
-    final path = '/api/v1/support/tickets/$ticketIdOrNumber/messages';
+    final path =
+        '/api/v1/support/tickets/${_ticketPathSegment(ticketIdOrNumber)}/messages';
     final rawBody = jsonEncode(<String, dynamic>{
       'message': message,
       'user_id': user.id,
@@ -497,7 +503,8 @@ class _SupportApiClient {
     required String ticketIdOrNumber,
     List<String>? messageIds,
   }) async {
-    final path = '/api/v1/support/tickets/$ticketIdOrNumber/messages/read';
+    final path =
+        '/api/v1/support/tickets/${_ticketPathSegment(ticketIdOrNumber)}/messages/read';
     final rawBody = jsonEncode(<String, dynamic>{
       if (messageIds != null && messageIds.isNotEmpty)
         'message_ids': messageIds,
