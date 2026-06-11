@@ -344,6 +344,11 @@ class _SupportApiClient {
           ? 'Request failed (HTTP $statusCode)'
           : 'Request failed';
     }
+    if (text.contains('Traceback') ||
+        text.contains('frappe.exceptions') ||
+        text.contains('apps/frappe')) {
+      return 'Support ticket chat is unavailable. Please try again.';
+    }
     if (RegExp(r'<html|<!doctype', caseSensitive: false).hasMatch(text)) {
       final title = RegExp(
         r'<title[^>]*>([^<]+)</title>',
