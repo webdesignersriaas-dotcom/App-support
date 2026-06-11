@@ -591,6 +591,11 @@ class _TicketListScreenState extends State<TicketListScreen> {
       if (cachedTickets != null) {
         _allTickets = cachedTickets;
         _tickets = _filteredTicketsForCurrentStatus();
+        _ticketUnreadCounts
+          ..clear()
+          ..addEntries(cachedTickets.map(
+            (ticket) => MapEntry(_ticketKey(ticket), ticket.unreadMessageCount),
+          ));
         _loading = false;
         unawaited(_refreshTicketUnreadCounts(_tickets));
         unawaited(_loadTickets(silent: true));
@@ -839,6 +844,11 @@ class _TicketListScreenState extends State<TicketListScreen> {
       if (!mounted) return;
       _allTickets = tickets;
       final filteredTickets = _filteredTicketsForCurrentStatus();
+      _ticketUnreadCounts
+        ..clear()
+        ..addEntries(tickets.map(
+          (ticket) => MapEntry(_ticketKey(ticket), ticket.unreadMessageCount),
+        ));
       setState(() {
         _tickets = filteredTickets;
         _loading = false;
