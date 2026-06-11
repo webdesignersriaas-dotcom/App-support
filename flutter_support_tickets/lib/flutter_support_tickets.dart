@@ -256,7 +256,7 @@ class _TicketMessage {
     return _TicketMessage(
       id: (j['id'] ?? '').toString(),
       ticketId: (j['ticket_id'] ?? '').toString(),
-      senderType: (j['sender_type'] ?? 'user').toString(),
+      senderType: (j['sender_type'] ?? 'user').toString().trim().toLowerCase(),
       senderName: (j['sender_name'] ?? '').toString(),
       message: (j['message'] ?? '').toString(),
       createdAt: DateTime.tryParse((j['created_at'] ?? '').toString()),
