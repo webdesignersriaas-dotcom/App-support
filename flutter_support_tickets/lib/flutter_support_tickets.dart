@@ -638,6 +638,18 @@ class _TicketListScreenState extends State<TicketListScreen> {
   String _ticketKey(_Ticket t) =>
       t.ticketNumber.trim().isNotEmpty ? t.ticketNumber.trim() : t.id.trim();
 
+  int _dashboardUnreadCount(_Ticket ticket) {
+    if (_isClosedTicketStatus(ticket.status) ||
+        _isClosedTicketStatus(_statusToUi(ticket.status))) {
+      return 0;
+    }
+    final cached = _ticketUnreadCounts[_ticketKey(ticket)];
+    final backend = ticket.unreadMessageCount;
+    final count = cached == null || backend > cached ? backend : cached;
+    if (count > 0) return count;
+    return ticket.hasPendingAgentReply ? 1 : 0;
+  }
+
   void _markTicketSeen(_Ticket ticket, List<_TicketMessage> messages) {
     final key = _ticketKey(ticket);
     DateTime? latestAgentAt = _ticketLastSeenAgentAt[key];
@@ -694,7 +706,10 @@ class _TicketListScreenState extends State<TicketListScreen> {
             unseenAgentCount += 1;
           }
         }
-        final backendCount = ticket.unreadMessageCount;
+        final backendCount =
+            ticket.hasPendingAgentReply && ticket.unreadMessageCount == 0
+                ? 1
+                : ticket.unreadMessageCount;
         return MapEntry<String, int>(
           key,
           unseenAgentCount > backendCount ? unseenAgentCount : backendCount,
@@ -1262,11 +1277,9 @@ class _TicketListScreenState extends State<TicketListScreen> {
                     final notificationsDisabled =
                         _isClosedTicketStatus(t.status) ||
                             _isClosedTicketStatus(statusUi);
-                    final unreadCount = notificationsDisabled
-                        ? 0
-                        : _ticketUnreadCounts[_ticketKey(t)] ?? 0;
-                    final hasUnread = !notificationsDisabled &&
-                        (unreadCount > 0 || t.hasPendingAgentReply);
+                    final unreadCount =
+                        notificationsDisabled ? 0 : _dashboardUnreadCount(t);
+                    final hasUnread = unreadCount > 0;
                     final badgeText = unreadCount > 0
                         ? (unreadCount > 99 ? '99+' : unreadCount.toString())
                         : '!';
